@@ -195,12 +195,14 @@ static __always_inline int return_unix_recvmsg(void *ctx, u64 id, int copied_len
     unsigned long peer_inode_number = 0;
     BPF_CORE_READ_INTO(&inode_number, sock_ptr, sk_socket, file, f_inode, i_ino);
     struct unix_sock *usock = unix_sock_from_sk(sock_ptr);
+    struct unix_address *addr = NULL;
 
     if (usock) {
         BPF_CORE_READ_INTO(&peer_inode_number, usock, peer, sk_socket, file, f_inode, i_ino);
+        BPF_CORE_READ_INTO(&addr, usock, addr);
     }
 
-    bpf_dbg_printk("ino %d, peer ino %d", inode_number, peer_inode_number);
+    bpf_dbg_printk("ino %d, peer ino %d, bound %d", inode_number, peer_inode_number, addr != NULL);
 
     pid_connection_info_t p_conn = {.conn = {0}};
 
@@ -210,7 +212,7 @@ static __always_inline int return_unix_recvmsg(void *ctx, u64 id, int copied_len
 
     if (read_len) {
         // doesn't return must be logically last statement
-        handle_buf_with_connection(ctx, &p_conn, buf, read_len, NO_SSL, TCP_RECV, 0, 0);
+        handle_unix_buf_with_connection(ctx, &p_conn, buf, read_len, TCP_RECV, addr == NULL);
     } else {
         bpf_dbg_printk("Not copied anything");
     }
