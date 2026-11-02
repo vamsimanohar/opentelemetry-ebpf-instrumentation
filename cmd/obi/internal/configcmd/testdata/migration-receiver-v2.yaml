@@ -104,6 +104,48 @@ instrumentation:
                 rules: []
             openai_compatible:
                 gateways: []
+            genai_tool_calls:
+                enabled: false
+                max_window: 10m0s
+                on_timeout: emit
+                close_on_next_request: true
+                match_by_name: true
+                emit_unmatched: true
+                unmatched_min_activity: 0
+                services:
+                    include: []
+                    exclude: []
+                kernel_activity:
+                    enabled: false
+                    probation: 1m0s
+                    exec: true
+                    file_open: true
+                    connect: true
+                    max_lineage_depth: 8
+                    path_exclude:
+                        - /proc/
+                        - /sys/
+                        - /dev/
+                        - '*/lib/python3*'
+                        - site-packages
+                        - node_modules
+                        - /etc/ld.so.cache
+                        - /lib64/
+                        - /usr/lib64/
+                        - /usr/lib/locale/
+                        - /usr/share/locale/
+                        - /etc/hosts
+                        - /etc/resolv.conf
+                        - /etc/nsswitch.conf
+                        - /etc/gai.conf
+                        - /etc/host.conf
+                        - cacert.pem
+                        - '*ca-bundle*'
+                        - '*ca-certificates*'
+                    exclude_llm_endpoints: true
+                    max_events_per_window: 512
+                    max_events_per_span: 64
+                    rate_limit_per_process: 2000
     grpc:
         enabled:
             traces: true

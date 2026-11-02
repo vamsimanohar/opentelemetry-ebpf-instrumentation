@@ -68,6 +68,8 @@ typedef struct http_info {
     u32 len;
     u32 resp_len;
     u32 task_tid;
+    // the host id of the thread that sent the request
+    u32 host_tid;
     u32 lb_req_bytes;
     u32 lb_res_bytes;
     u16 status;
@@ -78,6 +80,7 @@ typedef struct http_info {
     enum parent_status parent_status;
     enum event_source_type event_source;
     u8 response_observation;
+    u8 _pad[4];
 } http_info_t;
 
 static __always_inline bool still_responding(const http_info_t *info) {

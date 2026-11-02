@@ -534,7 +534,7 @@ func spanOTELGetters(name attr.Name) (attributes.Getter[*Span, attribute.KeyValu
 				return semconv.GenAISystemInstructionsKey.String(NormalizeSystemInstructions(s.GenAI.OpenAI.Request.Instructions))
 			}
 			if s.Type == EventTypeHTTPClient && s.SubType == HTTPSubtypeAnthropic && s.GenAI != nil && s.GenAI.Anthropic != nil {
-				return semconv.GenAISystemInstructionsKey.String(NormalizeSystemInstructions(s.GenAI.Anthropic.Input.System))
+				return semconv.GenAISystemInstructionsKey.String(NormalizeSystemInstructions(string(s.GenAI.Anthropic.Input.System)))
 			}
 			if s.Type == EventTypeHTTPClient && s.SubType == HTTPSubtypeGemini && s.GenAI != nil && s.GenAI.Gemini != nil {
 				return semconv.GenAISystemInstructionsKey.String(s.GenAI.Gemini.GetSystemInstruction())

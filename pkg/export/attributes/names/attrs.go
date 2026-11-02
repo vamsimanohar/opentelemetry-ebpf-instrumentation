@@ -55,6 +55,7 @@ const (
 	DBSystemName           = Name(semconv.DBSystemNameKey)
 	ErrorType              = Name(semconv.ErrorTypeKey)
 	ProcessExecutableName  = Name(semconv.ProcessExecutableNameKey)
+	ProcessCommandArgs     = Name(semconv.ProcessCommandArgsKey)
 	RPCMethod              = Name(semconv.RPCMethodKey)
 	RPCSystem              = Name(semconv.RPCSystemNameKey)
 	HTTPRoute              = Name(semconv.HTTPRouteKey)

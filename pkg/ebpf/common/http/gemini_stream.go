@@ -60,6 +60,7 @@ type geminiStreamPart struct {
 }
 
 type geminiFunctionCallData struct {
+	ID   string          `json:"id"`
 	Name string          `json:"name"`
 	Args json.RawMessage `json:"args,omitempty"`
 	// PartialArgs is intentionally a RawMessage because Vertex AI's
@@ -93,6 +94,7 @@ type candidatePart struct {
 // fcAggregator accumulates streaming function call arguments for Vertex AI's
 // streamFunctionCallArguments feature where args arrive across multiple chunks.
 type fcAggregator struct {
+	id        string
 	name      string
 	signature string
 	// argsAccum accumulates string-fragment style partial args (legacy shape).
@@ -407,47 +409,46 @@ type candidateAggregator struct {
 }
 
 // flushActiveFC finalizes any in-progress function call aggregation and
-// appends the result to the candidate's parts list. Returns the function
-// call name for toolCalls tracking (empty if nothing was flushed).
-func (ca *candidateAggregator) flushActiveFC() string {
+// appends the result to the candidate's parts list.
+func (ca *candidateAggregator) flushActiveFC() {
 	if ca.activeFC == nil {
-		return ""
+		return
 	}
 	fc := ca.activeFC
 	ca.activeFC = nil
 
 	if fc.name == "" {
-		return ""
+		return
 	}
 
 	var raw json.RawMessage
 	switch {
 	case fc.hasFullArg:
 		// Complete args arrived as a JSON object.
-		raw = buildFunctionCallRaw(fc.name, fc.fullArg, fc.signature)
+		raw = buildFunctionCallRaw(fc.id, fc.name, fc.fullArg, fc.signature)
 	case len(fc.argsObj) > 0:
 		// Args reconstructed from Vertex AI partialArgs array elements.
 		if b, err := json.Marshal(fc.argsObj); err == nil {
-			raw = buildFunctionCallRaw(fc.name, b, fc.signature)
+			raw = buildFunctionCallRaw(fc.id, fc.name, b, fc.signature)
 		} else {
-			raw = buildFunctionCallRaw(fc.name, nil, fc.signature)
+			raw = buildFunctionCallRaw(fc.id, fc.name, nil, fc.signature)
 		}
 	case fc.argsAccum.Len() > 0:
 		// Partial args were accumulated as string fragments.
-		raw = buildFunctionCallRaw(fc.name, json.RawMessage(fc.argsAccum.String()), fc.signature)
+		raw = buildFunctionCallRaw(fc.id, fc.name, json.RawMessage(fc.argsAccum.String()), fc.signature)
 	default:
 		// Name-only function call with no args.
-		raw = buildFunctionCallRaw(fc.name, nil, fc.signature)
+		raw = buildFunctionCallRaw(fc.id, fc.name, nil, fc.signature)
 	}
 
 	ca.parts = append(ca.parts, candidatePart{fcRaw: raw})
-	return fc.name
 }
 
 // buildFunctionCallRaw constructs the raw JSON for a function call part,
 // preserving the outer thoughtSignature when present.
-func buildFunctionCallRaw(name string, args json.RawMessage, signature string) json.RawMessage {
+func buildFunctionCallRaw(id, name string, args json.RawMessage, signature string) json.RawMessage {
 	type fcData struct {
+		ID   string          `json:"id,omitempty"`
 		Name string          `json:"name"`
 		Args json.RawMessage `json:"args,omitempty"`
 	}
@@ -455,7 +456,7 @@ func buildFunctionCallRaw(name string, args json.RawMessage, signature string) j
 		FunctionCall     fcData `json:"functionCall"`
 		ThoughtSignature string `json:"thoughtSignature,omitempty"`
 	}
-	w := fcWrapper{FunctionCall: fcData{Name: name, Args: args}, ThoughtSignature: signature}
+	w := fcWrapper{FunctionCall: fcData{ID: id, Name: name, Args: args}, ThoughtSignature: signature}
 	raw, err := json.Marshal(w)
 	if err != nil {
 		return nil
@@ -480,7 +481,6 @@ func parseGeminiStream(reader io.Reader) (*request.GeminiResponse, []request.Too
 
 	candidates := make(map[int]*candidateAggregator)
 	partialArgsBudget := partialArgBudget{}
-	var toolCalls []request.ToolCall
 	var modelVersion string
 	var responseID string
 	var usage request.GeminiUsage
@@ -550,9 +550,9 @@ func parseGeminiStream(reader io.Reader) (*request.GeminiResponse, []request.Too
 				}
 
 				if part.FunctionCall != nil {
-					partialArgsBudget, toolCalls = processFunctionCallPart(
+					partialArgsBudget = processFunctionCallPart(
 						agg, part.FunctionCall, part.ThoughtSignature,
-						partialArgsBudget, toolCalls,
+						partialArgsBudget,
 					)
 					continue
 				}
@@ -561,9 +561,7 @@ func parseGeminiStream(reader io.Reader) (*request.GeminiResponse, []request.Too
 				// thoughtSignature) that must be preserved.
 				if part.Text != "" || part.ThoughtSignature != "" {
 					// Flush any active function call before appending text.
-					if name := agg.flushActiveFC(); name != "" {
-						toolCalls = append(toolCalls, request.ToolCall{Name: name})
-					}
+					agg.flushActiveFC()
 					appendTextPart(agg, part)
 				}
 			}
@@ -572,9 +570,7 @@ func parseGeminiStream(reader io.Reader) (*request.GeminiResponse, []request.Too
 
 	// Flush any remaining active function calls.
 	for _, agg := range candidates {
-		if name := agg.flushActiveFC(); name != "" {
-			toolCalls = append(toolCalls, request.ToolCall{Name: name})
-		}
+		agg.flushActiveFC()
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -593,7 +589,7 @@ func parseGeminiStream(reader io.Reader) (*request.GeminiResponse, []request.Too
 
 	resp.Candidates = buildGeminiCandidates(candidates)
 
-	return resp, toolCalls
+	return resp, extractGeminiFunctionCalls(resp)
 }
 
 // appendTextPart adds a text fragment to the candidate aggregator, coalescing
@@ -628,17 +624,15 @@ func processFunctionCallPart(
 	fc *geminiFunctionCallData,
 	signature string,
 	budget partialArgBudget,
-	toolCalls []request.ToolCall,
-) (partialArgBudget, []request.ToolCall) {
+) partialArgBudget {
 	if fc.Name != "" {
 		// New named function call: flush any previous active FC.
-		if name := agg.flushActiveFC(); name != "" {
-			toolCalls = append(toolCalls, request.ToolCall{Name: name})
-		}
+		agg.flushActiveFC()
 
 		// If the call has complete args and no continuation, store directly.
 		if len(fc.Args) > 0 && len(fc.PartialArgs) == 0 {
 			agg.activeFC = &fcAggregator{
+				id:         fc.ID,
 				name:       fc.Name,
 				signature:  signature,
 				hasFullArg: true,
@@ -646,29 +640,25 @@ func processFunctionCallPart(
 			}
 			// If willContinue is nil or false, this is a complete call.
 			if fc.WillContinue == nil || !*fc.WillContinue {
-				if name := agg.flushActiveFC(); name != "" {
-					toolCalls = append(toolCalls, request.ToolCall{Name: name})
-				}
+				agg.flushActiveFC()
 			}
-			return budget, toolCalls
+			return budget
 		}
 
 		// Start aggregation (name only, or name with partial args).
-		agg.activeFC = &fcAggregator{name: fc.Name, signature: signature}
+		agg.activeFC = &fcAggregator{id: fc.ID, name: fc.Name, signature: signature}
 		budget = agg.activeFC.addPartialArgs(fc.PartialArgs, budget)
 
 		// If no continuation expected and no partial args, flush immediately.
 		if fc.WillContinue == nil && len(fc.PartialArgs) == 0 && len(fc.Args) == 0 {
-			if name := agg.flushActiveFC(); name != "" {
-				toolCalls = append(toolCalls, request.ToolCall{Name: name})
-			}
+			agg.flushActiveFC()
 		}
-		return budget, toolCalls
+		return budget
 	}
 
 	// Continuation fragment (no name): append to active function call.
 	if agg.activeFC == nil {
-		return budget, toolCalls
+		return budget
 	}
 	if len(fc.PartialArgs) > 0 {
 		budget = agg.activeFC.addPartialArgs(fc.PartialArgs, budget)
@@ -679,11 +669,9 @@ func processFunctionCallPart(
 
 	// If willContinue is explicitly false or absent, the call is complete.
 	if fc.WillContinue == nil || !*fc.WillContinue {
-		if name := agg.flushActiveFC(); name != "" {
-			toolCalls = append(toolCalls, request.ToolCall{Name: name})
-		}
+		agg.flushActiveFC()
 	}
-	return budget, toolCalls
+	return budget
 }
 
 // tryParseErrorLine attempts to parse a line as a bare Gemini error envelope.

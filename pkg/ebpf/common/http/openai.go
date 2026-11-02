@@ -17,7 +17,8 @@ type openAIToolCall struct {
 	ID       string `json:"id"`
 	Type     string `json:"type"`
 	Function struct {
-		Name string `json:"name"`
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
 	} `json:"function"`
 }
 
@@ -43,8 +44,11 @@ func extractToolCalls(choices json.RawMessage) []request.ToolCall {
 				continue
 			}
 			result = append(result, request.ToolCall{
-				ID:   tc.ID,
-				Name: tc.Function.Name,
+				ID:        tc.ID,
+				Name:      tc.Function.Name,
+				Arguments: tc.Function.Arguments,
+				Type:      tc.Type,
+				Index:     len(result),
 			})
 		}
 	}
@@ -57,7 +61,10 @@ func extractToolCalls(choices json.RawMessage) []request.ToolCall {
 func parseOpenAICompatibleResponse(respB []byte) (*request.VendorOpenAI, []request.ToolCall) {
 	if looksLikeJSON(respB) {
 		resp := parseVendorOpenAI(respB)
-		return &resp, extractToolCalls(resp.Choices)
+		if toolCalls := extractToolCalls(resp.Choices); len(toolCalls) > 0 {
+			return &resp, toolCalls
+		}
+		return &resp, extractResponsesToolCalls(resp.Output)
 	}
 	reader := bytes.NewReader(respB)
 	return parseOpenAIStream(reader)

@@ -28,6 +28,7 @@ import (
 
 	"go.opentelemetry.io/otel/trace"
 
+	"go.opentelemetry.io/obi/pkg/appolly/app/agentact"
 	"go.opentelemetry.io/obi/pkg/appolly/app/request"
 	"go.opentelemetry.io/obi/pkg/config"
 	"go.opentelemetry.io/obi/pkg/ebpf/common/dnsparser"
@@ -271,6 +272,9 @@ type Tracing struct {
 	Program  *ebpf.Program
 	AttachAs ebpf.AttachType
 	Link     link.Link
+	// Required, if true, will cancel the execution of the eBPF Tracer when
+	// the program cannot be attached
+	Required bool
 }
 
 type MisclassifiedEvent struct {
@@ -342,6 +346,12 @@ type EBPFEventContext struct {
 	MapsLock         sync.Mutex
 	LoadLock         sync.Mutex
 	Capabilities     TracerCapability
+
+	// AgentActivity receives the kernel activity of instrumented processes and
+	// their descendants, and AgentRoots selects the processes it is reported
+	// for. Nil unless inferred tool calls observe it.
+	AgentActivity *msg.Queue[[]agentact.Event]
+	AgentRoots    *agentact.RootRegistry
 
 	internalEventHandlersMu sync.RWMutex
 	internalEventHandlers   map[uint8]func(*ringbuf.Record) error

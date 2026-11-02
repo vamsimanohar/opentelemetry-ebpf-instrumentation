@@ -55,3 +55,70 @@ func NormalizeBedrockOutput(resp *BedrockResponse) string {
 	}
 	return string(out)
 }
+
+// converseBlock is a Bedrock Converse (and Amazon Nova) content block. It
+// names its kind by key rather than by a "type" field.
+type converseBlock struct {
+	Type    string `json:"type"`
+	Text    string `json:"text"`
+	ToolUse *struct {
+		ToolUseID string          `json:"toolUseId"`
+		Name      string          `json:"name"`
+		Input     json.RawMessage `json:"input"`
+	} `json:"toolUse"`
+	ToolResult *struct {
+		ToolUseID string          `json:"toolUseId"`
+		Content   json.RawMessage `json:"content"`
+	} `json:"toolResult"`
+}
+
+// converseContentToParts converts Converse content blocks to semconv parts.
+// It reports false for content in another shape, such as Anthropic blocks.
+func converseContentToParts(raw json.RawMessage) ([]normalizedPart, bool) {
+	var blocks []converseBlock
+	if err := json.Unmarshal(raw, &blocks); err != nil {
+		return nil, false
+	}
+
+	parts := make([]normalizedPart, 0, len(blocks))
+	for _, b := range blocks {
+		switch {
+		case b.Type != "":
+			return nil, false
+		case b.ToolUse != nil:
+			parts = append(parts, normalizedPart{Type: "tool_call", ID: b.ToolUse.ToolUseID, Name: b.ToolUse.Name, Arguments: b.ToolUse.Input})
+		case b.ToolResult != nil:
+			parts = append(parts, normalizedPart{Type: "tool_call_response", ID: b.ToolResult.ToolUseID, Response: extractToolResultContent(b.ToolResult.Content)})
+		default:
+			parts = append(parts, normalizedPart{Type: "text", Content: b.Text})
+		}
+	}
+	return parts, true
+}
+
+// normalizeConverseMessages converts Converse request messages, or reports
+// false when they are Anthropic-shaped.
+func normalizeConverseMessages(raw json.RawMessage) (string, bool) {
+	var msgs []struct {
+		Role    string          `json:"role"`
+		Content json.RawMessage `json:"content"`
+	}
+	if err := json.Unmarshal(raw, &msgs); err != nil {
+		return "", false
+	}
+
+	out := make([]normalizedMessage, 0, len(msgs))
+	for _, m := range msgs {
+		parts, ok := converseContentToParts(m.Content)
+		if !ok {
+			return "", false
+		}
+		out = append(out, normalizedMessage{Role: m.Role, Parts: parts})
+	}
+
+	b, err := json.Marshal(out)
+	if err != nil {
+		return "", false
+	}
+	return string(b), true
+}

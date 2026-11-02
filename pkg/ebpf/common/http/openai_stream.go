@@ -8,7 +8,11 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"maps"
+	"slices"
 	"strings"
+
+	jsoniter "github.com/json-iterator/go"
 
 	"go.opentelemetry.io/obi/pkg/appolly/app/request"
 )
@@ -18,10 +22,14 @@ import (
 const maxStreamToolCalls = 256
 
 type openAIStreamChunk struct {
-	ID      string `json:"id"`
-	Object  string `json:"object"`
-	Model   string `json:"model"`
-	Choices []struct {
+	ID     string `json:"id"`
+	Object string `json:"object"`
+	Model  string `json:"model"`
+	// Type, Item and OutputIndex are set on Responses API stream events.
+	Type        string          `json:"type"`
+	Item        json.RawMessage `json:"item"`
+	OutputIndex int             `json:"output_index"`
+	Choices     []struct {
 		Index int `json:"index"`
 		Delta struct {
 			Role      string                 `json:"role"`
@@ -52,12 +60,8 @@ func parseOpenAIStream(reader io.Reader) (*request.VendorOpenAI, []request.ToolC
 	var finishReason string
 	var role string
 	var contentBuilder strings.Builder
-	// toolCallAccum accumulates tool call fragments by index.
-	type toolCallAccum struct {
-		id   string
-		name string
-	}
-	var accumulators []toolCallAccum
+	var accumulators []openAIToolCallAccum
+	var responses responsesStreamOutput
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -73,6 +77,7 @@ func parseOpenAIStream(reader io.Reader) (*request.VendorOpenAI, []request.ToolC
 
 		var chunk openAIStreamChunk
 		unmarshalJSONBestEffort([]byte(data), &chunk)
+		responses.add(&chunk, []byte(data))
 		var responseFields struct {
 			ID    string `json:"id"`
 			Model string `json:"model"`
@@ -129,47 +134,16 @@ func parseOpenAIStream(reader io.Reader) (*request.VendorOpenAI, []request.ToolC
 
 				// Grow the accumulator slice as needed.
 				for len(accumulators) <= idx {
-					accumulators = append(accumulators, toolCallAccum{})
+					accumulators = append(accumulators, openAIToolCallAccum{})
 				}
 
-				if tc.ID != "" {
-					accumulators[idx].id = tc.ID
-				}
-				if tc.Function.Name != "" {
-					accumulators[idx].name = tc.Function.Name
-				}
-
+				accumulators[idx].add(tc)
 			}
 		}
 	}
 
 	if err := scanner.Err(); err != nil {
 		slog.Debug("parseOpenAIStream: scanner error", "error", err)
-	}
-
-	// Build the Choices JSON with the aggregated message content and
-	// finish_reason so that VendorOpenAI.GetFinishReasons() and the GenAI
-	// output normalization (normalizeOpenAIChoices) work correctly.
-	if finishReason != "" || contentBuilder.Len() > 0 {
-		type streamChoice struct {
-			Message struct {
-				Role    string `json:"role"`
-				Content string `json:"content"`
-			} `json:"message"`
-			FinishReason string `json:"finish_reason"`
-		}
-
-		sc := streamChoice{FinishReason: finishReason}
-		sc.Message.Role = role
-		if sc.Message.Role == "" {
-			sc.Message.Role = "assistant"
-		}
-		sc.Message.Content = contentBuilder.String()
-
-		choicesJSON, err := json.Marshal([]streamChoice{sc})
-		if err == nil {
-			response.Choices = choicesJSON
-		}
 	}
 
 	// Build the final tool calls list.
@@ -179,9 +153,29 @@ func parseOpenAIStream(reader io.Reader) (*request.VendorOpenAI, []request.ToolC
 			continue
 		}
 		toolCalls = append(toolCalls, request.ToolCall{
-			ID:   accumulators[i].id,
-			Name: accumulators[i].name,
+			ID:        accumulators[i].id,
+			Name:      accumulators[i].name,
+			Arguments: string(accumulators[i].arguments),
+			Type:      accumulators[i].toolType,
+			Index:     len(toolCalls),
 		})
+	}
+
+	// Build the Choices JSON with the aggregated message content, tool calls
+	// and finish_reason so that VendorOpenAI.GetFinishReasons() and the GenAI
+	// output normalization (normalizeOpenAIChoices) work correctly.
+	if finishReason != "" || contentBuilder.Len() > 0 || len(toolCalls) > 0 {
+		if choicesJSON, err := json.Marshal([]openAIStreamChoice{newOpenAIStreamChoice(role, contentBuilder.String(), finishReason, toolCalls)}); err == nil {
+			response.Choices = choicesJSON
+		}
+	}
+
+	// A Responses API stream carries its output as items, not choices.
+	if output := responses.output(); len(output) > 0 {
+		response.Output = output
+		if len(toolCalls) == 0 {
+			toolCalls = extractResponsesToolCalls(output)
+		}
 	}
 
 	_, inputReported := response.Usage.InputTokenCount()
@@ -192,4 +186,101 @@ func parseOpenAIStream(reader io.Reader) (*request.VendorOpenAI, []request.ToolC
 	}
 
 	return response, toolCalls
+}
+
+// openAIToolCallAccum accumulates the fragments of one streamed tool call. Only
+// the first delta of a call carries its id and name; the arguments arrive as
+// string fragments in order.
+type openAIToolCallAccum struct {
+	id        string
+	name      string
+	toolType  string
+	arguments []byte
+}
+
+func (a *openAIToolCallAccum) add(tc *openAIStreamToolCall) {
+	if tc.ID != "" {
+		a.id = tc.ID
+	}
+	if tc.Function.Name != "" {
+		a.name = tc.Function.Name
+	}
+	if tc.Type != "" {
+		a.toolType = tc.Type
+	}
+	a.arguments = append(a.arguments, tc.Function.Arguments...)
+}
+
+type openAIStreamChoice struct {
+	Message struct {
+		Role      string                 `json:"role"`
+		Content   string                 `json:"content"`
+		ToolCalls []openAIStreamToolCall `json:"tool_calls,omitempty"`
+	} `json:"message"`
+	FinishReason string `json:"finish_reason"`
+}
+
+func newOpenAIStreamChoice(role, content, finishReason string, toolCalls []request.ToolCall) openAIStreamChoice {
+	sc := openAIStreamChoice{FinishReason: finishReason}
+	sc.Message.Role = role
+	if sc.Message.Role == "" {
+		sc.Message.Role = "assistant"
+	}
+	sc.Message.Content = content
+
+	for i := range toolCalls {
+		tc := openAIStreamToolCall{Index: toolCalls[i].Index, ID: toolCalls[i].ID, Type: toolCalls[i].Type}
+		tc.Function.Name = toolCalls[i].Name
+		tc.Function.Arguments = toolCalls[i].Arguments
+		sc.Message.ToolCalls = append(sc.Message.ToolCalls, tc)
+	}
+
+	return sc
+}
+
+// responsesStreamOutput rebuilds the `output` array of a Responses API stream:
+// from the terminal event's full response when it was captured, otherwise from
+// the completed items in output order.
+type responsesStreamOutput struct {
+	final json.RawMessage
+	items map[int]json.RawMessage
+}
+
+func (r *responsesStreamOutput) add(chunk *openAIStreamChunk, data []byte) {
+	switch chunk.Type {
+	case "response.output_item.done":
+		if len(chunk.Item) == 0 || chunk.OutputIndex < 0 || chunk.OutputIndex >= maxStreamToolCalls {
+			return
+		}
+		if r.items == nil {
+			r.items = map[int]json.RawMessage{}
+		}
+		r.items[chunk.OutputIndex] = chunk.Item
+	case "response.completed", "response.incomplete", "response.failed":
+		if output := jsonBestEffort.Get(data, "response", "output"); output.ValueType() == jsoniter.ArrayValue {
+			r.final = json.RawMessage(output.ToString())
+		}
+	}
+}
+
+func (r *responsesStreamOutput) output() json.RawMessage {
+	if len(r.final) > 0 {
+		return r.final
+	}
+	if len(r.items) == 0 {
+		return nil
+	}
+
+	indexes := slices.Sorted(maps.Keys(r.items))
+	items := make([]json.RawMessage, 0, len(indexes))
+	for _, i := range indexes {
+		items = append(items, r.items[i])
+	}
+
+	output, err := json.Marshal(items)
+	if err != nil {
+		return nil
+	}
+
+	return output
 }

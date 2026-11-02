@@ -22,9 +22,35 @@ const (
 )
 
 type anthropicContentBlock struct {
-	Type string `json:"type"`
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	Type  string          `json:"type"`
+	ID    string          `json:"id"`
+	Name  string          `json:"name"`
+	Input json.RawMessage `json:"input,omitempty"`
+}
+
+// anthropicServerToolBlocks are tool calls Anthropic executes itself; their
+// results come back in the same response.
+var anthropicServerToolBlocks = map[string]struct{}{
+	"server_tool_use": {},
+	"mcp_tool_use":    {},
+}
+
+// anthropicToolCall converts a tool block to a tool call, reporting whether the
+// block is a tool call at all.
+func anthropicToolCall(block *anthropicContentBlock, index int) (request.ToolCall, bool) {
+	_, serverSide := anthropicServerToolBlocks[block.Type]
+	if (block.Type != "tool_use" && !serverSide) || block.Name == "" {
+		return request.ToolCall{}, false
+	}
+
+	return request.ToolCall{
+		ID:         block.ID,
+		Name:       block.Name,
+		Arguments:  string(block.Input),
+		Type:       "function",
+		Index:      index,
+		ServerSide: serverSide,
+	}, true
 }
 
 func extractAnthropicToolCalls(content json.RawMessage) []request.ToolCall {
@@ -39,13 +65,9 @@ func extractAnthropicToolCalls(content json.RawMessage) []request.ToolCall {
 
 	var result []request.ToolCall
 	for i := range blocks {
-		if blocks[i].Type != "tool_use" || blocks[i].Name == "" {
-			continue
+		if tc, ok := anthropicToolCall(&blocks[i], len(result)); ok {
+			result = append(result, tc)
 		}
-		result = append(result, request.ToolCall{
-			ID:   blocks[i].ID,
-			Name: blocks[i].Name,
-		})
 	}
 	return result
 }
@@ -202,8 +224,9 @@ type ContentBlockDelta struct {
 	Type  string `json:"type"`
 	Index int    `json:"index"`
 	Delta struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
+		Type        string `json:"type"`
+		Text        string `json:"text"`
+		PartialJSON string `json:"partial_json"`
 	} `json:"delta"`
 }
 
@@ -222,7 +245,7 @@ func parseAnthropicStream(reader io.Reader) (*request.AnthropicResponse, []reque
 	response := &request.AnthropicResponse{}
 
 	var contentBuilder strings.Builder
-	var toolCalls []request.ToolCall
+	var toolCalls anthropicStreamToolCalls
 	var currentEvent string
 	var currentData string
 	flushEvent := func() {
@@ -259,14 +282,88 @@ func parseAnthropicStream(reader io.Reader) (*request.AnthropicResponse, []reque
 
 	flushEvent()
 
-	response.Content = json.RawMessage(contentBuilder.String())
+	calls := toolCalls.result()
+	response.Content = anthropicStreamContent(contentBuilder.String(), calls)
 	if err := scanner.Err(); err != nil {
-		return response, toolCalls, fmt.Errorf("error reading stream: %w", err)
+		return response, calls, fmt.Errorf("error reading stream: %w", err)
 	}
-	return response, toolCalls, nil
+	return response, calls, nil
 }
 
-func processEvent(eventType, data string, response *request.AnthropicResponse, contentBuilder *strings.Builder, toolCalls *[]request.ToolCall) {
+// anthropicStreamToolCalls assembles streamed tool_use blocks: the id and name
+// arrive in content_block_start, the input as partial JSON in the deltas of
+// the same block index.
+type anthropicStreamToolCalls struct {
+	calls   []request.ToolCall
+	inputs  [][]byte
+	byIndex map[int]int
+}
+
+func (a *anthropicStreamToolCalls) start(blockIndex int, block *anthropicContentBlock) {
+	tc, ok := anthropicToolCall(block, len(a.calls))
+	if !ok {
+		return
+	}
+	if a.byIndex == nil {
+		a.byIndex = map[int]int{}
+	}
+	a.byIndex[blockIndex] = len(a.calls)
+	a.calls = append(a.calls, tc)
+	a.inputs = append(a.inputs, nil)
+}
+
+func (a *anthropicStreamToolCalls) addInput(blockIndex int, partial string) {
+	if i, ok := a.byIndex[blockIndex]; ok {
+		a.inputs[i] = append(a.inputs[i], partial...)
+	}
+}
+
+func (a *anthropicStreamToolCalls) result() []request.ToolCall {
+	for i := range a.calls {
+		if len(a.inputs[i]) > 0 {
+			a.calls[i].Arguments = string(a.inputs[i])
+		}
+	}
+	return a.calls
+}
+
+// anthropicStreamContent rebuilds the response content. Text-only streams keep
+// the plain text; streams with tool calls get content blocks so the output
+// messages carry the tool_call parts too.
+func anthropicStreamContent(text string, calls []request.ToolCall) json.RawMessage {
+	if len(calls) == 0 {
+		return json.RawMessage(text)
+	}
+
+	type textBlock struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+
+	blocks := make([]any, 0, len(calls)+1)
+	if text != "" {
+		blocks = append(blocks, textBlock{Type: "text", Text: text})
+	}
+	for i := range calls {
+		if calls[i].ServerSide {
+			continue
+		}
+		input := json.RawMessage(calls[i].Arguments)
+		if !json.Valid(input) {
+			// a truncated stream leaves the input incomplete
+			input = json.RawMessage("{}")
+		}
+		blocks = append(blocks, anthropicContentBlock{Type: "tool_use", ID: calls[i].ID, Name: calls[i].Name, Input: input})
+	}
+
+	content, err := json.Marshal(blocks)
+	if err != nil {
+		return json.RawMessage(text)
+	}
+	return content
+}
+
+func processEvent(eventType, data string, response *request.AnthropicResponse, contentBuilder *strings.Builder, toolCalls *anthropicStreamToolCalls) {
 	switch eventType {
 	case "message_start":
 		var event MessageStartEvent
@@ -283,8 +380,11 @@ func processEvent(eventType, data string, response *request.AnthropicResponse, c
 	case "content_block_delta":
 		var event ContentBlockDelta
 		unmarshalJSONBestEffort([]byte(data), &event)
-		if event.Delta.Type == "text_delta" {
+		switch event.Delta.Type {
+		case "text_delta":
 			contentBuilder.WriteString(event.Delta.Text)
+		case "input_json_delta":
+			toolCalls.addInput(event.Index, event.Delta.PartialJSON)
 		}
 
 	case "message_delta":
@@ -299,15 +399,13 @@ func processEvent(eventType, data string, response *request.AnthropicResponse, c
 
 	case "content_block_start":
 		var event struct {
+			Index        int                   `json:"index"`
 			ContentBlock anthropicContentBlock `json:"content_block"`
 		}
 		unmarshalJSONBestEffort([]byte(data), &event)
-		if event.ContentBlock.Type == "tool_use" && event.ContentBlock.Name != "" {
-			*toolCalls = append(*toolCalls, request.ToolCall{
-				ID:   event.ContentBlock.ID,
-				Name: event.ContentBlock.Name,
-			})
-		}
+		// the start block's input is a placeholder; the deltas carry the real one
+		event.ContentBlock.Input = nil
+		toolCalls.start(event.Index, &event.ContentBlock)
 
 	case "ping", "content_block_stop", "message_stop":
 		return

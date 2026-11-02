@@ -79,7 +79,9 @@ func extractHostname(req *http.Request) string {
 
 type geminiPart struct {
 	FunctionCall *struct {
-		Name string `json:"name"`
+		ID   string          `json:"id"`
+		Name string          `json:"name"`
+		Args json.RawMessage `json:"args"`
 	} `json:"functionCall,omitempty"`
 }
 
@@ -98,8 +100,13 @@ func extractGeminiFunctionCalls(resp *request.GeminiResponse) []request.ToolCall
 			if parts[j].FunctionCall == nil || parts[j].FunctionCall.Name == "" {
 				continue
 			}
+			// The id is optional: Gemini pairs id-less results by name.
 			result = append(result, request.ToolCall{
-				Name: parts[j].FunctionCall.Name,
+				ID:        parts[j].FunctionCall.ID,
+				Name:      parts[j].FunctionCall.Name,
+				Arguments: string(parts[j].FunctionCall.Args),
+				Type:      "function",
+				Index:     len(result),
 			})
 		}
 	}

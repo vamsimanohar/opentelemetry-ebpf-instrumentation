@@ -15,6 +15,7 @@ import (
 	"go.opentelemetry.io/obi/internal/config/schema"
 	"go.opentelemetry.io/obi/pkg/appolly/discover"
 	"go.opentelemetry.io/obi/pkg/appolly/services"
+	obiconfig "go.opentelemetry.io/obi/pkg/config"
 	"go.opentelemetry.io/obi/pkg/export/instrumentations"
 	"go.opentelemetry.io/obi/pkg/filter"
 	"go.opentelemetry.io/obi/pkg/obi"
@@ -158,7 +159,22 @@ func payloadExtraction(cfg *obi.Config) schema.PayloadExtraction {
 		OpenAICompatible: schema.OpenAICompatiblePayload{
 			Gateways: http.GenAI.OpenAICompatible.Gateways,
 		},
-		Enrichment: httpEnrichment(cfg),
+		GenAIToolCalls: genAIToolCalls(&http.GenAI.ToolCalls),
+		Enrichment:     httpEnrichment(cfg),
+	}
+}
+
+func genAIToolCalls(tc *obiconfig.GenAIToolCallsConfig) schema.GenAIToolCallsPayload {
+	return schema.GenAIToolCallsPayload{
+		Enabled:              tc.Enabled,
+		MaxWindow:            schema.Duration(tc.MaxWindow),
+		OnTimeout:            tc.OnTimeout,
+		CloseOnNextRequest:   tc.CloseOnNextRequest,
+		MatchByName:          tc.MatchByName,
+		EmitUnmatched:        tc.EmitUnmatched,
+		UnmatchedMinActivity: tc.UnmatchedMinActivity,
+		Services:             tc.Services,
+		KernelActivity:       tc.KernelActivity,
 	}
 }
 

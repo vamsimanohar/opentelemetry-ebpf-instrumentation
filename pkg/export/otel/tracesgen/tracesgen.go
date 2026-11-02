@@ -322,6 +322,7 @@ func generateTracesWithAttributes(
 		if !hasSubSpans {
 			appendSpanLinks(s, span.Links)
 		}
+		appendSpanEvents(s, span.Events)
 		s.SetEndTimestamp(pcommon.NewTimestampFromTime(t.End))
 	}
 	return traces
@@ -411,6 +412,7 @@ func appendSpanLinks(dst ptrace.Span, links []request.SpanLink) {
 		link.SetTraceID(pcommon.TraceID(spanLink.TraceID))
 		link.SetSpanID(pcommon.SpanID(spanLink.SpanID))
 		link.SetFlags(uint32(spanLink.TraceFlags))
+		addAttrsToMap(spanLink.Attributes, link.Attributes())
 	}
 }
 
@@ -475,7 +477,8 @@ func CodeToStatusCode(code string) ptrace.StatusCode {
 
 func acceptSpan(is instrumentations.InstrumentationSelection, span *request.Span) bool {
 	switch span.Type {
-	case request.EventTypeManualSpan, request.EventTypeFailedConnect:
+	case request.EventTypeManualSpan, request.EventTypeFailedConnect,
+		request.EventTypeGenAIToolExec, request.EventTypeGenAIToolWindow, request.EventTypeProcessExec:
 		return true
 	case request.EventTypeGPUCudaKernelLaunch,
 		request.EventTypeGPUCudaGraphLaunch,
@@ -1086,7 +1089,7 @@ func traceAttributesSelectorInternal(span *request.Span, optionalAttrs map[attr.
 			}
 			if _, ok := optionalAttrs[attr.GenAIInstructions]; ok {
 				if ai.Input.System != "" {
-					attrs = appendIfSet(attrs, semconv.GenAISystemInstructionsKey.String, request.NormalizeSystemInstructions(ai.Input.System))
+					attrs = appendIfSet(attrs, semconv.GenAISystemInstructionsKey.String, request.NormalizeSystemInstructions(string(ai.Input.System)))
 				}
 			}
 			if _, ok := optionalAttrs[attr.GenAITools]; ok {
@@ -1780,6 +1783,10 @@ func traceAttributesSelectorInternal(span *request.Span, optionalAttrs map[attr.
 		}
 	case request.EventTypeManualSpan:
 		attrs = manualSpanAttributes(span)
+	case request.EventTypeGenAIToolExec, request.EventTypeGenAIToolWindow:
+		attrs = inferredToolAttributes(span, optionalAttrs)
+	case request.EventTypeProcessExec:
+		attrs = observedProcessAttributes(span, optionalAttrs)
 	case request.EventTypeFailedConnect:
 		attrs = []attribute.KeyValue{
 			request.ServerPort(span.HostPort),
@@ -1957,7 +1964,8 @@ func spanKind(span *request.Span) trace2.SpanKind {
 	switch span.Type {
 	case request.EventTypeHTTP, request.EventTypeGRPC, request.EventTypeRedisServer, request.EventTypeSunRPCServer, request.EventTypeMemcachedServer, request.EventTypeSQLServer, request.EventTypeAerospikeServer:
 		return trace2.SpanKindServer
-	case request.EventTypeHTTPClient, request.EventTypeGRPCClient, request.EventTypeSQLClient, request.EventTypeRedisClient, request.EventTypeMongoClient, request.EventTypeCouchbaseClient, request.EventTypeMemcachedClient, request.EventTypeSunRPCClient, request.EventTypeAerospikeClient, request.EventTypeFailedConnect:
+	case request.EventTypeHTTPClient, request.EventTypeGRPCClient, request.EventTypeSQLClient, request.EventTypeRedisClient, request.EventTypeMongoClient, request.EventTypeCouchbaseClient, request.EventTypeMemcachedClient, request.EventTypeSunRPCClient, request.EventTypeAerospikeClient, request.EventTypeFailedConnect,
+		request.EventTypeProcessExec:
 		return trace2.SpanKindClient
 	// A messaging span is a producer, a consumer or a client, decided by the
 	// operation rather than by the side OBI observed it from. Semantic

@@ -203,6 +203,7 @@ type PayloadExtraction struct {
 	SQLPP            SQLPPPayload            `yaml:"sqlpp"`
 	Enrichment       HTTPEnrichment          `yaml:"enrichment"`
 	OpenAICompatible OpenAICompatiblePayload `yaml:"openai_compatible"`
+	GenAIToolCalls   GenAIToolCallsPayload   `yaml:"genai_tool_calls"`
 }
 
 // SQLPPPayload describes SQL++ payload extraction settings.
@@ -250,6 +251,20 @@ type HTTPEnrichmentPolicy struct {
 type HTTPEnrichmentDefaultAction struct {
 	Headers config.HTTPParsingAction `yaml:"headers"`
 	Body    config.HTTPParsingAction `yaml:"body"`
+}
+
+// GenAIToolCallsPayload describes the inferred execute_tool spans built from
+// the tool calls of LLM responses and the tool results of later requests.
+type GenAIToolCallsPayload struct {
+	Enabled              bool                                 `yaml:"enabled"`
+	MaxWindow            Duration                             `yaml:"max_window"`
+	OnTimeout            config.ToolCallTimeoutAction         `yaml:"on_timeout"`
+	CloseOnNextRequest   bool                                 `yaml:"close_on_next_request"`
+	MatchByName          bool                                 `yaml:"match_by_name"`
+	EmitUnmatched        bool                                 `yaml:"emit_unmatched"`
+	UnmatchedMinActivity int                                  `yaml:"unmatched_min_activity"`
+	Services             config.GenAIToolCallsServices        `yaml:"services"`
+	KernelActivity       config.GenAIToolKernelActivityConfig `yaml:"kernel_activity"`
 }
 
 // OpenAICompatiblePayload describes OpenAI-compatible gateway payload extraction

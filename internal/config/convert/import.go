@@ -1459,7 +1459,22 @@ func applyFullV2HTTPPayloadExtraction(cfg *obi.Config, payload schema.PayloadExt
 	http.SQLPP.EndpointPatterns = cloneStrings(payload.SQLPP.EndpointPatterns)
 	http.SQLPP.PreparedStatementsCacheSize = payload.SQLPP.PreparedStatementsCacheSize
 	http.GenAI.OpenAICompatible.Gateways = payload.OpenAICompatible.Gateways
+	applyV2GenAIToolCalls(&http.GenAI.ToolCalls, payload.GenAIToolCalls)
 	applyFullV2HTTPEnrichment(http, payload.Enrichment)
+}
+
+func applyV2GenAIToolCalls(dst *obiconfig.GenAIToolCallsConfig, src schema.GenAIToolCallsPayload) {
+	dst.Enabled = src.Enabled
+	dst.MaxWindow = src.MaxWindow.TimeDuration()
+	dst.OnTimeout = src.OnTimeout
+	dst.CloseOnNextRequest = src.CloseOnNextRequest
+	dst.MatchByName = src.MatchByName
+	dst.EmitUnmatched = src.EmitUnmatched
+	dst.UnmatchedMinActivity = src.UnmatchedMinActivity
+	dst.Services.Include = cloneStrings(src.Services.Include)
+	dst.Services.Exclude = cloneStrings(src.Services.Exclude)
+	dst.KernelActivity = src.KernelActivity
+	dst.KernelActivity.PathExclude = cloneStrings(src.KernelActivity.PathExclude)
 }
 
 func applyPartialV2HTTPPayloadExtraction(cfg *obi.Config, payload schema.PayloadExtraction) {
@@ -1479,6 +1494,9 @@ func applyPartialV2HTTPPayloadExtraction(cfg *obi.Config, payload schema.Payload
 	}
 	if payload.OpenAICompatible.Gateways != nil {
 		http.GenAI.OpenAICompatible.Gateways = payload.OpenAICompatible.Gateways
+	}
+	if !zeroValue(payload.GenAIToolCalls) {
+		applyV2GenAIToolCalls(&http.GenAI.ToolCalls, payload.GenAIToolCalls)
 	}
 	if !zeroValue(payload.Enrichment) {
 		applyPartialV2HTTPEnrichment(http, payload.Enrichment)

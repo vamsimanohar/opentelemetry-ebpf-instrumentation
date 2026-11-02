@@ -147,6 +147,8 @@ var exactIncludeOnlyAttrs = map[attr.Name]struct{}{
 	attr.GenAIToolCallArguments: {},
 	attr.GenAIToolCallResult:    {},
 	attr.GenAIResponseError:     {},
+	// command lines of the processes a tool ran may hold secrets
+	attr.ProcessCommandArgs: {},
 }
 
 // NewAttrSelector returns an AttrSelector instance based on the user-provided attributes Selection

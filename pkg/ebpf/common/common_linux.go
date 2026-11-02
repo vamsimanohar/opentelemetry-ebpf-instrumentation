@@ -170,6 +170,7 @@ const (
 	KSymPipeWrite     KSym = "pipe_write"
 	KSymAnonPipeWrite KSym = "anon_pipe_write"
 	KSymDoWritev      KSym = "do_writev"
+	KSymDoSysOpenat2  KSym = "do_sys_openat2"
 
 	// Stable symbol, used for testing
 	KSymTCPSendmsg KSym = "tcp_sendmsg"
@@ -186,6 +187,7 @@ var kSymsCache = struct {
 		KSymPipeWrite:     false,
 		KSymAnonPipeWrite: false,
 		KSymDoWritev:      false,
+		KSymDoSysOpenat2:  false,
 		KSymTCPSendmsg:    false,
 		KSymTestDummy:     false,
 	},

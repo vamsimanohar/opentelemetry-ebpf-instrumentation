@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"go.opentelemetry.io/obi/pkg/appolly"
+	"go.opentelemetry.io/obi/pkg/appolly/app/agentact"
 	"go.opentelemetry.io/obi/pkg/appolly/app/request"
 	"go.opentelemetry.io/obi/pkg/appolly/discover"
 	"go.opentelemetry.io/obi/pkg/appolly/discover/exec"
@@ -110,6 +111,10 @@ func NewWithProtocolMetricSelection(ctx context.Context, ctxInfo *global.Context
 
 	runtimeMetrics := newRuntimeMetricsQueue(config, ctxInfo.Metrics)
 	ebpfEventContext := ebpfcommon.NewEBPFEventContext()
+	if toolCalls := &config.EBPF.PayloadExtraction.HTTP.GenAI.ToolCalls; toolCalls.Enabled && toolCalls.KernelActivity.Enabled {
+		ebpfEventContext.AgentActivity = msg2.QueueFromConfig[[]agentact.Event](config, ctxInfo.Metrics, "agentActivity")
+		ebpfEventContext.AgentRoots = agentact.NewRootRegistry()
+	}
 	ctxInfo.AppO11y.EBPFEventContext = ebpfEventContext
 
 	bp, err := appolly.BuildWithProtocolMetricSelection(ctx, config, ctxInfo, tracesInput, processEventCloudDecorated, runtimeMetrics, selection)

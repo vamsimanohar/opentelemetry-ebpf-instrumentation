@@ -359,6 +359,7 @@ static __always_inline void process_http_request(http_info_t *info,
     task_tid(&self_key);
     java_vt_translate_tid(&self_key);
     info->task_tid = self_key.tid;
+    info->host_tid = (u32)bpf_get_current_pid_tgid();
 }
 
 static __always_inline void process_http_response(http_info_t *info, const unsigned char *buf) {

@@ -6,6 +6,7 @@ package ebpfcommon // import "go.opentelemetry.io/obi/pkg/ebpf/common"
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -94,6 +95,7 @@ func httpInfoToSpanLegacy(info *HTTPInfo) request.Span {
 			UserPID:   app.PID(info.Pid.UserPid),
 			Namespace: info.Pid.Ns,
 		},
+		TID:          info.HostTid,
 		Statement:    scheme + request.SchemeHostSeparator + info.HeaderHost,
 		ProtoVersion: info.ProtoVersion,
 	}
@@ -205,12 +207,31 @@ func httpRequestResponseToSpan(parseCtx *EBPFParseContext, event *BPFHTTPInfo, r
 			UserPID:   app.PID(event.Pid.UserPid),
 			Namespace: event.Pid.Ns,
 		},
+		TID:       event.HostTid,
 		Statement: scheme + request.SchemeHostSeparator + headerHost,
 	}
 
 	markResponseObservation(&httpSpan, event)
 
-	return postProcessHTTPSpan(parseCtx, &httpSpan, req, resp)
+	span := postProcessHTTPSpan(parseCtx, &httpSpan, req, resp)
+	keepUnparsedGenAIRequest(parseCtx, &span, req)
+	return span
+}
+
+// keepUnparsedGenAIRequest keeps on the span a GenAI request body that is not
+// complete JSON, such as one with capture holes, so the inferred tool calls
+// can still find the result ids it carries.
+func keepUnparsedGenAIRequest(parseCtx *EBPFParseContext, span *request.Span, req *http.Request) {
+	if parseCtx == nil || !parseCtx.payloadExtraction.HTTP.GenAI.ToolCalls.Enabled || span.GenAI == nil || req.Body == nil {
+		return
+	}
+
+	// the detectors leave the body rewound
+	body, err := io.ReadAll(req.Body)
+	req.Body = io.NopCloser(bytes.NewReader(body))
+	if err == nil && len(body) > 0 && !json.Valid(body) {
+		span.GenAI.UnparsedRequest = body
+	}
 }
 
 func postProcessHTTPSpan(parseCtx *EBPFParseContext, httpSpan *request.Span, req *http.Request, resp *http.Response) request.Span {

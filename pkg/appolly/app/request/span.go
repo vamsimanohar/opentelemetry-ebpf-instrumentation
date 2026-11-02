@@ -76,6 +76,13 @@ const (
 	EventTypeSunRPCServer
 	EventTypeAerospikeClient
 	EventTypeAerospikeServer
+	// The following types are synthesized in user space and have no C counterpart.
+	// EventTypeGenAIToolExec is an inferred execution of a tool call an LLM requested.
+	EventTypeGenAIToolExec
+	// EventTypeGenAIToolWindow groups the inferred executions of parallel tool calls.
+	EventTypeGenAIToolWindow
+	// EventTypeProcessExec is a process observed while an inferred tool call was open.
+	EventTypeProcessExec
 )
 
 const (
@@ -233,6 +240,12 @@ func (t EventType) String() string {
 		return "AerospikeClient"
 	case EventTypeAerospikeServer:
 		return "AerospikeServer"
+	case EventTypeGenAIToolExec:
+		return "GenAIToolExec"
+	case EventTypeGenAIToolWindow:
+		return "GenAIToolWindow"
+	case EventTypeProcessExec:
+		return "ProcessExec"
 	default:
 		return fmt.Sprintf("UNKNOWN (%d)", t)
 	}
@@ -439,6 +452,10 @@ type GenAI struct {
 	Ollama           *VendorOpenAI
 	Cohere           *VendorOpenAI
 	OpenAICompatible *VendorOpenAI
+	// UnparsedRequest keeps the captured request body when it is not complete
+	// JSON, so tool-result ids can still be searched for. Only set when inferred
+	// tool calls are enabled.
+	UnparsedRequest []byte
 }
 
 type OpenAIInputTokensDetails struct {
@@ -477,6 +494,11 @@ type ToolCall struct {
 	// providers, an object for Anthropic, Gemini and Ollama.
 	Arguments string `json:"arguments,omitempty"`
 	Type      string `json:"type,omitempty"`
+	// Index is the position of the call among the calls of its response.
+	Index int `json:"-"`
+	// ServerSide marks tools the provider runs itself (web search, code
+	// interpreter, remote MCP): nothing executes them on this host.
+	ServerSide bool `json:"-"`
 }
 
 type VendorOpenAI struct {
@@ -654,6 +676,9 @@ type OpenAIInput struct {
 	Tools            json.RawMessage `json:"tools,omitempty"`
 	ServiceTier      string          `json:"service_tier,omitempty"`
 	Parameters       json.RawMessage `json:"parameters,omitempty"`
+	// PreviousResponseID names the stored response a stateful Responses API
+	// request continues.
+	PreviousResponseID string `json:"previous_response_id,omitempty"`
 	// InputItems retains the Responses API `input` array (function_call /
 	// function_call_output items), which cannot be held by the string Input
 	// field. Populated only for /v1/responses traffic.
@@ -721,7 +746,7 @@ type AnthropicRequest struct {
 	Messages      json.RawMessage `json:"messages"`
 	Model         string          `json:"model"`
 	Stream        bool            `json:"stream"`
-	System        string          `json:"system"`
+	System        SystemPrompt    `json:"system"`
 	Tools         json.RawMessage `json:"tools"`
 	Temperature   *float64        `json:"temperature,omitempty"`
 	TopP          *float64        `json:"top_p,omitempty"`
@@ -885,6 +910,7 @@ type VendorBedrock struct {
 	Model       string // extracted from URL path: /model/{modelId}/invoke
 	IsStream    bool
 	GuardrailID string
+	ToolCalls   []ToolCall `json:"-"`
 }
 
 // BedrockRequest covers the common fields across all model families.
@@ -893,7 +919,7 @@ type VendorBedrock struct {
 type BedrockRequest struct {
 	// Anthropic Claude / Amazon Nova format
 	Messages    json.RawMessage `json:"messages,omitempty"`
-	System      string          `json:"system,omitempty"`
+	System      SystemPrompt    `json:"system,omitempty"`
 	MaxTokens   int             `json:"max_tokens,omitempty"`
 	Temperature float64         `json:"temperature,omitempty"`
 	TopP        float64         `json:"top_p,omitempty"`
@@ -969,6 +995,9 @@ type TitanResult struct {
 
 func (b *VendorBedrock) GetInput() string {
 	if len(b.Input.Messages) > 0 {
+		if converse, ok := normalizeConverseMessages(b.Input.Messages); ok {
+			return converse
+		}
 		return NormalizeAnthropicInput(b.Input.Messages)
 	}
 	if b.Input.Prompt != "" {
@@ -985,8 +1014,14 @@ func (b *VendorBedrock) GetOutput() string {
 	if len(b.Output.Content) > 0 {
 		return string(b.Output.Content)
 	}
-	// Amazon Nova: output.message.content
+	// Amazon Nova and Converse: output.message.content
 	if b.Output.Output != nil && b.Output.Output.Message != nil && len(b.Output.Output.Message.Content) > 0 {
+		if parts, ok := converseContentToParts(b.Output.Output.Message.Content); ok {
+			msg := normalizedMessage{Role: b.Output.Output.Message.Role, Parts: parts, FinishReason: b.Output.StopReasonNova}
+			if out, err := json.Marshal([]normalizedMessage{msg}); err == nil {
+				return string(out)
+			}
+		}
 		return wrapTextAsOutputMessage(
 			b.Output.Output.Message.Role,
 			string(b.Output.Output.Message.Content),
@@ -1005,7 +1040,7 @@ func (b *VendorBedrock) GetOutput() string {
 }
 
 func (b *VendorBedrock) GetSystemInstruction() string {
-	return NormalizeSystemInstructions(b.Input.System)
+	return NormalizeSystemInstructions(string(b.Input.System))
 }
 
 func (b *VendorBedrock) GetStopReason() string {
@@ -1494,9 +1529,18 @@ type RetrievalUsage struct {
 }
 
 type SpanLink struct {
-	TraceID    trace.TraceID `json:"traceID"`
-	SpanID     trace.SpanID  `json:"spanID"`
-	TraceFlags uint8         `json:"traceFlags,string"`
+	TraceID    trace.TraceID        `json:"traceID"`
+	SpanID     trace.SpanID         `json:"spanID"`
+	TraceFlags uint8                `json:"traceFlags,string"`
+	Attributes []attribute.KeyValue `json:"-"`
+}
+
+// SpanEvent is a timestamped annotation of a span. Time is a monotonic
+// timestamp, like the span's Start and End.
+type SpanEvent struct {
+	Name       string
+	Time       int64
+	Attributes []attribute.KeyValue
 }
 
 // ResponseObservation mirrors the kernel's enum http_response_observation: how much of
@@ -1554,7 +1598,9 @@ type Span struct {
 	ParentConditional bool           `json:"-"`
 	TraceFlags        uint8          `json:"traceFlags,string"`
 	Links             []SpanLink     `json:"links,omitempty"`
+	Events            []SpanEvent    `json:"-"`
 	Pid               PidInfo        `json:"-"`
+	TID               uint32         `json:"-"` // thread that performed the request, when known
 	PeerName          string         `json:"peerName"`
 	HostName          string         `json:"hostName"`
 	OtherNamespace    string         `json:"-"`
@@ -1573,6 +1619,10 @@ type Span struct {
 	AWS               *AWS           `json:"-"`
 	GenAI             *GenAI         `json:"-"`
 	JSONRPC           *JSONRPC       `json:"-"`
+	// InferredTool describes EventTypeGenAIToolExec and EventTypeGenAIToolWindow spans.
+	InferredTool *InferredTool `json:"-"`
+	// Process describes EventTypeProcessExec spans.
+	Process *ObservedProcess `json:"-"`
 
 	// Anything but ResponseParsed means Status holds no observation. Whether the
 	// duration is a measurement is recorded separately, by ignoreDurations.
@@ -1945,6 +1995,12 @@ type Timings struct {
 	End          time.Time
 }
 
+// MonotonicTime converts a monotonic timestamp, such as the time of a span
+// event, to wall-clock time the way Timings converts the span bounds.
+func MonotonicTime(ts int64) time.Time {
+	return clocks.clock().Add(time.Duration(ts) - clocks.monoClock())
+}
+
 func (s *Span) Timings() Timings {
 	now := clocks.clock()
 	monoNow := clocks.monoClock()
@@ -2016,6 +2072,10 @@ func SpanStatusCode(span *Span) string {
 		return StatusCodeUnset
 	case EventTypeFailedConnect:
 		return StatusCodeError
+	case EventTypeGenAIToolExec, EventTypeProcessExec:
+		if span.agentToolFailed() {
+			return StatusCodeError
+		}
 	}
 	return StatusCodeUnset
 }
@@ -2348,6 +2408,8 @@ func (s *Span) TraceName() string {
 			}
 		}
 		return dbSpanName(s.Method, target, dbSystemNameForSpan(s))
+	case EventTypeGenAIToolExec, EventTypeGenAIToolWindow, EventTypeProcessExec:
+		return s.agentToolSpanName()
 	}
 	return ""
 }

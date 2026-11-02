@@ -155,7 +155,7 @@ func TestAnthropicSpan_JSONResponse(t *testing.T) {
 	assert.Equal(t, "claude-sonnet-4-6", span.GenAI.Anthropic.Input.Model)
 	assert.Equal(t, 128, span.GenAI.Anthropic.Input.MaxTokens)
 	assert.False(t, span.GenAI.Anthropic.Input.Stream)
-	assert.Equal(t, "Be concise.", span.GenAI.Anthropic.Input.System)
+	assert.Equal(t, request.SystemPrompt("Be concise."), span.GenAI.Anthropic.Input.System)
 	assert.JSONEq(t, `[{"role":"user","content":"Explain quantum computing in simple terms"}]`, string(span.GenAI.Anthropic.Input.Messages))
 
 	assert.Equal(t, "msg_01QCj5VkxPS3NQUtrt5Npjcr", span.GenAI.Anthropic.Output.ID)
@@ -609,4 +609,15 @@ func TestAnthropicSpan_OperationComesFromTheRequestPath(t *testing.T) {
 			assert.Equal(t, tc.want, span.GenAI.Anthropic.Output.Type)
 		})
 	}
+}
+
+func TestParseAnthropicRequestSystemBlocks(t *testing.T) {
+	// the best-effort decoder stopped at a system block list, losing what follows
+	req := parseAnthropicRequest([]byte(`{"model":"claude-sonnet-4-5","max_tokens":64,
+		"system":[{"type":"text","text":"be brief"}],
+		"messages":[{"role":"user","content":"hi"}],
+		"tools":[{"name":"read_file","input_schema":{"type":"object"}}]}`))
+	assert.Equal(t, request.SystemPrompt("be brief"), req.System)
+	assert.NotEmpty(t, req.Messages)
+	assert.NotEmpty(t, req.Tools)
 }

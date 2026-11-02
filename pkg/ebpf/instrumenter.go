@@ -1115,6 +1115,19 @@ func (i *instrumenter) tracepoints(p KprobesTracer) error {
 }
 
 func (i *instrumenter) tracepoint(funcName string, programs ebpfcommon.ProbeDesc) error {
+	// a raw tracepoint is named without its category
+	if programs.Start != nil && programs.Start.Type() == ebpf.RawTracepoint {
+		tp, err := link.AttachRawTracepoint(link.RawTracepointOptions{Name: funcName, Program: programs.Start})
+		if err != nil {
+			if i.metrics != nil {
+				i.metrics.InstrumentationError(i.processName, imetrics.InstrumentationErrorInvalidTracepoint)
+			}
+			return fmt.Errorf("attaching raw tracepoint: %w", err)
+		}
+		i.closables = append(i.closables, tp)
+		return nil
+	}
+
 	if programs.Start != nil {
 		if !strings.Contains(funcName, "/") {
 			if i.metrics != nil {
@@ -1168,6 +1181,10 @@ func (i *instrumenter) tracing(p Tracer) error {
 		if err != nil {
 			if i.metrics != nil {
 				i.metrics.InstrumentationError(i.processName, imetrics.InstrumentationErrorAttachingTracing)
+			}
+			if !tracing.Required {
+				slog.Warn("could not attach tracing program", "program", tracing.Program.String(), "error", err)
+				continue
 			}
 			return fmt.Errorf("attaching tracing program: %w", err)
 		}

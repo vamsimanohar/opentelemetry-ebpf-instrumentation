@@ -93,3 +93,29 @@ func TestNormalizeBedrockOutput_UnknownBlockType(t *testing.T) {
 	assert.Equal(t, "custom", msgs[0].Parts[0].Type)
 	assert.Equal(t, "custom content", msgs[0].Parts[0].Content)
 }
+
+func TestNormalizeConverseContent(t *testing.T) {
+	b := VendorBedrock{
+		Input: BedrockRequest{Messages: json.RawMessage(`[
+			{"role":"user","content":[{"text":"weather?"}]},
+			{"role":"assistant","content":[{"toolUse":{"toolUseId":"tooluse_1","name":"get_weather","input":{"city":"Paris"}}}]},
+			{"role":"user","content":[{"toolResult":{"toolUseId":"tooluse_1","content":[{"text":"rainy"}],"status":"success"}}]}]`)},
+		Output: BedrockResponse{
+			StopReasonNova: "tool_use",
+			Output: &NovaOutput{Message: &NovaMessage{Role: "assistant", Content: json.RawMessage(
+				`[{"text":"checking"},{"toolUse":{"toolUseId":"tooluse_2","name":"get_time","input":{}}}]`)}},
+		},
+	}
+
+	assert.JSONEq(t, `[
+		{"role":"user","parts":[{"type":"text","content":"weather?"}]},
+		{"role":"assistant","parts":[{"type":"tool_call","id":"tooluse_1","name":"get_weather","arguments":{"city":"Paris"}}]},
+		{"role":"user","parts":[{"type":"tool_call_response","id":"tooluse_1","result":[{"text":"rainy"}]}]}]`, b.GetInput())
+	assert.JSONEq(t, `[{"role":"assistant","finish_reason":"tool_use","parts":[
+		{"type":"text","content":"checking"},
+		{"type":"tool_call","id":"tooluse_2","name":"get_time","arguments":{}}]}]`, b.GetOutput())
+
+	// Anthropic-shaped content keeps its own normalization
+	b.Input.Messages = json.RawMessage(`[{"role":"user","content":[{"type":"text","text":"hi"}]}]`)
+	assert.JSONEq(t, `[{"role":"user","parts":[{"type":"text","content":"hi"}]}]`, b.GetInput())
+}

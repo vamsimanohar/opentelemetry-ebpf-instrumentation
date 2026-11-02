@@ -24,6 +24,7 @@
 #include <common/tcp_info.h>
 #include <common/tracked_connection.h>
 
+#include <generictracer/agent_activity.h>
 #include <generictracer/dns.h>
 #include <generictracer/k_send_receive.h>
 #include <generictracer/send_buffer.h>
@@ -212,6 +213,8 @@ static __always_inline void store_sock_pid(struct sock *sk) {
 SEC("kprobe/tcp_connect")
 int BPF_KPROBE_GUARDED(obi_kprobe_tcp_connect, struct sock *sk) {
     (void)ctx;
+
+    agent_activity_on_connect(sk);
 
     const u64 id = bpf_get_current_pid_tgid();
 

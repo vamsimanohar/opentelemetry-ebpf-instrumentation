@@ -68,7 +68,10 @@ func BedrockSpan(baseSpan *request.Span, req *http.Request, resp *http.Response)
 	}
 
 	var parsedResponse request.BedrockResponse
-	if len(respB) > 0 && !unmarshalJSON(respB, &parsedResponse) {
+	switch {
+	case isEventStream(resp):
+		parsedResponse = parseBedrockEventStream(respB)
+	case len(respB) > 0 && !unmarshalJSON(respB, &parsedResponse):
 		slog.Debug("failed to parse Bedrock response, continuing with partial fields")
 	}
 	var usage request.BedrockUsage
@@ -94,10 +97,52 @@ func BedrockSpan(baseSpan *request.Span, req *http.Request, resp *http.Response)
 			Model:       model,
 			IsStream:    isStream,
 			GuardrailID: guardrailID,
+			ToolCalls:   extractBedrockToolCalls(&parsedResponse),
 		},
 	}
 
 	return *baseSpan, true
+}
+
+// extractBedrockToolCalls reads the tool calls of an InvokeModel response with
+// an Anthropic body (`content[].tool_use`) or of a Converse response
+// (`output.message.content[].toolUse`).
+func extractBedrockToolCalls(resp *request.BedrockResponse) []request.ToolCall {
+	if len(resp.Content) > 0 {
+		return extractAnthropicToolCalls(resp.Content)
+	}
+	if resp.Output == nil || resp.Output.Message == nil || len(resp.Output.Message.Content) == 0 {
+		return nil
+	}
+
+	var blocks []struct {
+		ToolUse *struct {
+			ToolUseID string          `json:"toolUseId"`
+			Name      string          `json:"name"`
+			Input     json.RawMessage `json:"input"`
+			Type      string          `json:"type"`
+		} `json:"toolUse"`
+	}
+	if err := json.Unmarshal(resp.Output.Message.Content, &blocks); err != nil {
+		return nil
+	}
+
+	var result []request.ToolCall
+	for i := range blocks {
+		tu := blocks[i].ToolUse
+		if tu == nil || tu.Name == "" {
+			continue
+		}
+		result = append(result, request.ToolCall{
+			ID:         tu.ToolUseID,
+			Name:       tu.Name,
+			Arguments:  string(tu.Input),
+			Type:       "function",
+			Index:      len(result),
+			ServerSide: tu.Type == "server_tool_use",
+		})
+	}
+	return result
 }
 
 func mergeBedrockUsage(dst *request.BedrockUsage, src request.BedrockUsage) {

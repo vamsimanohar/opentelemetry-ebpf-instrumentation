@@ -109,6 +109,16 @@ type GenAIConfig struct {
 	Cohere CohereConfig `yaml:"-" json:"-"`
 	// OpenAI-compatible gateway payload extraction and parsing
 	OpenAICompatible OpenAICompatibleConfig `yaml:"openai_compatible"`
+	// Inferred execute_tool spans from LLM tool calls and their results. Config v2 only.
+	ToolCalls GenAIToolCallsConfig `yaml:"-" json:"-"`
+}
+
+// ProvidersEnabled reports whether any extractor of an LLM provider whose
+// responses carry tool calls is enabled.
+func (g *GenAIConfig) ProvidersEnabled() bool {
+	return g.OpenAI.Enabled || g.Anthropic.Enabled || g.Gemini.Enabled ||
+		g.Qwen.Enabled || g.Bedrock.Enabled || g.Ollama.Enabled ||
+		g.Cohere.Enabled || g.OpenAICompatible.Enabled
 }
 
 func (g *GenAIConfig) Enabled() bool {

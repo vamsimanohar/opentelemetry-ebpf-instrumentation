@@ -194,6 +194,34 @@ var DefaultConfig = Config{
 					MCP: config.MCPConfig{
 						Enabled: false,
 					},
+					ToolCalls: config.GenAIToolCallsConfig{
+						Enabled:            false,
+						MaxWindow:          10 * time.Minute,
+						OnTimeout:          config.ToolCallTimeoutEmit,
+						CloseOnNextRequest: true,
+						MatchByName:        true,
+						EmitUnmatched:      true,
+						KernelActivity: config.GenAIToolKernelActivityConfig{
+							Enabled:         false,
+							Probation:       time.Minute,
+							Exec:            true,
+							FileOpen:        true,
+							Connect:         true,
+							MaxLineageDepth: 8,
+							// runtime internals, interpreter imports, the dynamic loader,
+							// name resolution, and the CA bundles LLM clients reopen
+							PathExclude: []string{
+								"/proc/", "/sys/", "/dev/", "*/lib/python3*", "site-packages", "node_modules",
+								"/etc/ld.so.cache", "/lib64/", "/usr/lib64/", "/usr/lib/locale/", "/usr/share/locale/",
+								"/etc/hosts", "/etc/resolv.conf", "/etc/nsswitch.conf", "/etc/gai.conf", "/etc/host.conf",
+								"cacert.pem", "*ca-bundle*", "*ca-certificates*",
+							},
+							ExcludeLLMEndpoints: true,
+							MaxEventsPerWindow:  512,
+							MaxEventsPerSpan:    64,
+							RateLimitPerProcess: 2000,
+						},
+					},
 				},
 				Enrichment: config.EnrichmentConfig{
 					Enabled: false,
@@ -848,6 +876,11 @@ func (c *Config) validate(context validationContext) error {
 	}
 
 	if err := c.EBPF.PayloadExtraction.HTTP.Enrichment.Validate(); err != nil {
+		return ConfigError(err.Error())
+	}
+
+	genAI := &c.EBPF.PayloadExtraction.HTTP.GenAI
+	if err := genAI.ToolCalls.Validate(c.EBPF.BufferSizes.HTTP, genAI); err != nil {
 		return ConfigError(err.Error())
 	}
 

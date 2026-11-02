@@ -507,6 +507,7 @@ func getDefinitions(
 				attr.GenAITools:             false,
 				attr.GenAIToolCallArguments: false,
 				attr.GenAIToolCallResult:    false,
+				attr.ProcessCommandArgs:     false,
 				attr.GenAIResponseError:     false,
 				attr.DBResponseError:        false,
 				// Conditionally Required or Recommended by OTel semconv, so emitted

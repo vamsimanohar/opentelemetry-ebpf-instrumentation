@@ -82,6 +82,20 @@ func textPrinter(in *msg.Queue[[]request.Span]) swarm.RunFunc {
 func printSpan(span *request.Span) {
 	t := span.Timings()
 
+	if span.InferredTool != nil || span.Process != nil {
+		fmt.Printf("%s (%s) %s %q events=%d links=%d svc=[%s] traceparent=[%s]\n",
+			t.Start.Format("2006-01-02 15:04:05.12345"),
+			t.End.Sub(t.Start),
+			span.Type,
+			span.TraceName(),
+			len(span.Events),
+			len(span.Links),
+			&span.Service,
+			traceparent(span),
+		)
+		return
+	}
+
 	pn := ""
 	hn := ""
 

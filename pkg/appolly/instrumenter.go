@@ -7,6 +7,8 @@ import (
 	"context"
 	"time"
 
+	"go.opentelemetry.io/obi/pkg/appolly/agenttools"
+	"go.opentelemetry.io/obi/pkg/appolly/app/agentact"
 	"go.opentelemetry.io/obi/pkg/appolly/app/request"
 	"go.opentelemetry.io/obi/pkg/appolly/discover/exec"
 	"go.opentelemetry.io/obi/pkg/cloud"
@@ -146,9 +148,14 @@ func newGraphBuilderWithProtocolMetricSelection(
 		exportableSpans = msg2.QueueFromConfig[[]request.Span](config, ctxInfo.Metrics, "exportableSpans")
 	}
 	nameResolverToAttrFilter := msg2.QueueFromConfig[[]request.Span](config, ctxInfo.Metrics, "nameResolverToAttrFilter")
+	parentSettlerToToolSpans := msg2.QueueFromConfig[[]request.Span](config, ctxInfo.Metrics, "parentSettlerToToolSpans")
 	swi.Add(SettleConditionalParents(config.EBPF.MaxTransactionTime,
-		nameResolverToParentSettler, nameResolverToAttrFilter),
+		nameResolverToParentSettler, parentSettlerToToolSpans),
 		swarm.WithID("SettleConditionalParents"))
+	activity, roots := agentActivity(ctxInfo)
+	swi.Add(agenttools.ToolSpans(&config.EBPF.PayloadExtraction.HTTP.GenAI.ToolCalls, config.EBPF.MaxTransactionTime,
+		activity, roots, processEventsCh, parentSettlerToToolSpans, nameResolverToAttrFilter),
+		swarm.WithID("AgentToolSpans"))
 	attrFilteredSpans := msg2.QueueFromConfig[[]request.Span](config, ctxInfo.Metrics, "attrFilteredSpans")
 	swi.Add(filter.ByAttribute(config.Filters.Application,
 		nil,
@@ -195,6 +202,16 @@ func newGraphBuilderWithProtocolMetricSelection(
 	// and interconnect each node according to the SendTo invocations in the
 	// Connect() method of the nodesMap.
 	return gb
+}
+
+// agentActivity returns the kernel activity queue the eBPF tracers feed and
+// the registry of the processes they report it for, or nils when no tracer
+// does.
+func agentActivity(ctxInfo *global.ContextInfo) (*msg.Queue[[]agentact.Event], *agentact.RootRegistry) {
+	if ctxInfo.AppO11y.EBPFEventContext == nil {
+		return nil, nil
+	}
+	return ctxInfo.AppO11y.EBPFEventContext.AgentActivity, ctxInfo.AppO11y.EBPFEventContext.AgentRoots
 }
 
 func setupMetricsSubPipeline(

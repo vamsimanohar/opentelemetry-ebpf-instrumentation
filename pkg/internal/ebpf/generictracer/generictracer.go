@@ -183,6 +183,11 @@ func (p *Tracer) LoadSpecs() ([]*ebpfcommon.SpecBundle, error) {
 	if !ebpfcommon.SupportsJavaHTTP1ReservationCleanup() {
 		ebpfcommon.DisableJavaHTTP1Atomics(spec)
 	}
+	if p.agentActivity() == nil {
+		disableAgentActivity(spec)
+	} else {
+		p.prepareAgentOpen(spec)
+	}
 
 	return []*ebpfcommon.SpecBundle{{Spec: spec, Objects: &p.bpfObjects, Constants: p.constants()}}, nil
 }
@@ -253,6 +258,7 @@ func (p *Tracer) constants() map[string]any {
 	}
 
 	m["g_traces_ctx_v1_enabled"] = p.traceCtxMapEnabled
+	p.agentActivityConstants(m)
 
 	return m
 }
@@ -384,17 +390,21 @@ func (p *Tracer) KProbes() map[string]ebpfcommon.ProbeDesc {
 			Start:    p.bpfObjects.ObiKprobeTcpRateCheckAppLimited,
 		}
 	}
+	p.agentActivityKProbes(kp)
 
 	return kp
 }
 
 func (p *Tracer) Tracepoints() map[string]ebpfcommon.ProbeDesc {
-	return map[string]ebpfcommon.ProbeDesc{
+	tp := map[string]ebpfcommon.ProbeDesc{
 		"sched/sched_process_exit": {
 			Required: false,
 			Start:    p.bpfObjects.ObiTpSchedProcessExit,
 		},
 	}
+	p.agentActivityTracepoints(tp)
+
+	return tp
 }
 
 func (p *Tracer) UProbes() map[string]map[string][]*ebpfcommon.ProbeDesc {
@@ -665,7 +675,7 @@ func (p *Tracer) runItersForPID(pid app.PID) {
 	p.seenNetns.Add(inode, struct{}{})
 }
 
-func (p *Tracer) Tracing() []*ebpfcommon.Tracing { return nil }
+func (p *Tracer) Tracing() []*ebpfcommon.Tracing { return p.agentActivityTracing() }
 
 func (p *Tracer) RecordInstrumentedLib(id uint64, closers []io.Closer) {
 	p.libsMux.Lock()
@@ -747,6 +757,7 @@ func (p *Tracer) Run(
 	go p.watchForMisclassifedEvents(ctx)
 	go p.lookForTimeouts(ctx, parseContext, timeoutTicker, eventsChan)
 	defer timeoutTicker.Stop()
+	p.forwardAgentActivity(ctx)
 
 	p.runItersForPids()
 

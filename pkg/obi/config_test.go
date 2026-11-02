@@ -235,6 +235,9 @@ discovery:
 						},
 						PreparedStatementsCacheSize: 1024,
 					},
+					GenAI: config.GenAIConfig{
+						ToolCalls: DefaultConfig.EBPF.PayloadExtraction.HTTP.GenAI.ToolCalls,
+					},
 					Enrichment: config.EnrichmentConfig{
 						Policy: config.HTTPParsingPolicy{
 							DefaultAction: config.HTTPParsingDefaultAction{
@@ -2056,4 +2059,24 @@ func TestConfigV1IgnoresAzure(t *testing.T) {
 	cfg = &Config{}
 	require.NoError(t, cfg.UnmarshalMap(map[string]any{"name_resolver": map[string]any{"sources": []any{"azure", "rdns"}}}))
 	require.Equal(t, []transform.Source{transform.SourceRDNS}, cfg.NameResolver.Sources)
+}
+
+func TestConfig_GenAIToolCallsEnv(t *testing.T) {
+	t.Setenv("OTEL_EBPF_GENAI_TOOL_CALLS_ENABLED", "true")
+	t.Setenv("OTEL_EBPF_GENAI_TOOL_CALLS_KERNEL_ACTIVITY_ENABLED", "true")
+	t.Setenv("OTEL_EBPF_GENAI_TOOL_CALLS_MAX_WINDOW", "90s")
+	cfg, err := LoadConfig(bytes.NewReader(nil))
+	require.NoError(t, err)
+
+	tc := cfg.EBPF.PayloadExtraction.HTTP.GenAI.ToolCalls
+	assert.True(t, tc.Enabled)
+	assert.True(t, tc.KernelActivity.Enabled)
+	assert.Equal(t, 90*time.Second, tc.MaxWindow)
+	assert.True(t, tc.EmitUnmatched, "defaults survive")
+
+	// payload capture and a GenAI extractor are prerequisites
+	require.ErrorContains(t, tc.Validate(0, &cfg.EBPF.PayloadExtraction.HTTP.GenAI), "buffer size")
+	require.ErrorContains(t, tc.Validate(1024, &cfg.EBPF.PayloadExtraction.HTTP.GenAI), "GenAI payload extractor")
+	cfg.EBPF.PayloadExtraction.HTTP.GenAI.OpenAI.Enabled = true
+	require.NoError(t, tc.Validate(1024, &cfg.EBPF.PayloadExtraction.HTTP.GenAI))
 }
