@@ -4,8 +4,10 @@
 package agenttools // import "go.opentelemetry.io/obi/pkg/appolly/agenttools"
 
 import (
+	"bytes"
 	"hash/maphash"
 	"slices"
+	"strings"
 	"time"
 
 	"go.opentelemetry.io/obi/pkg/appolly/app/request"
@@ -20,7 +22,24 @@ const (
 	maxConversationAliases    = 1024
 	maxUnresolvedPerProcess   = 64
 	unresolvedConversationTTL = 30 * time.Second
+	// call ids read from the captured part of a history the capture cut
+	maxHistoryCallIDs = 256
+	// minRandomIDChars is how many characters of a call id, besides the
+	// tool's name, a provider prefix and plain numbers, must look random for
+	// the id to tell its conversation apart. Servers that number calls by
+	// position ("functions.read_doc:0", "tool_call_000001") issue the same
+	// id in every conversation that takes the same steps.
+	minRandomIDChars = 8
 )
+
+// callIDPrefixes are the fixed prefixes providers and servers put before
+// the random part of a call id.
+var callIDPrefixes = []string{"chatcmpl-tool-", "functions.", "tooluse_", "toolu_", "call_", "call-", "tool_", "fc_"}
+
+// historyIDKeys name the fields that carry tool-call ids in a history.
+var historyIDKeys = [][]byte{
+	[]byte(`"id"`), []byte(`"tool_call_id"`), []byte(`"call_id"`), []byte(`"tool_use_id"`), []byte(`"toolUseId"`),
+}
 
 // conversations ties the LLM calls of a process to their conversations, from
 // the evidence their requests carry: the stored response a request continues,
@@ -32,7 +51,7 @@ type conversations struct {
 	prefixOrder []historyPrefix
 	responses   map[string]uint64
 	responseIDs []string
-	calls       map[string]uint64
+	calls       map[string]callOwner
 	callIDs     []string
 	aliases     map[uint64]uint64
 	aliasOrder  []uint64
@@ -43,6 +62,14 @@ type historyPrefix struct {
 	len  int
 	hash uint64
 	key  uint64
+}
+
+// callOwner is the conversation whose response issued a call id. An id
+// that responses of two conversations issued is shared: it is evidence of
+// neither.
+type callOwner struct {
+	key    uint64
+	shared bool
 }
 
 // unresolvedRequest continues a conversation none of whose earlier requests
@@ -65,7 +92,7 @@ func newConversations() *conversations {
 	return &conversations{
 		prefixes:  map[uint64][]historyPrefix{},
 		responses: map[string]uint64{},
-		calls:     map[string]uint64{},
+		calls:     map[string]callOwner{},
 		aliases:   map[uint64]uint64{},
 	}
 }
@@ -79,8 +106,12 @@ type conversationRequest struct {
 	calls      []request.ToolCall
 	// the prefixes of the request's history at each of its elements
 	prefixes []historyPrefix
-	// the capture cut the history: the request has turns after its last prefix
+	// the capture cut the history: the request has turns after its last
+	// prefix, and its prefixes are no evidence. Another conversation that
+	// starts with the same system prompt or document shares them.
 	cut bool
+	// the call ids the captured part of a cut history carries
+	historyIDs []string
 }
 
 // annotateConversation ties an LLM call to its conversation and annotates its
@@ -102,6 +133,9 @@ func (t *tracker) annotateConversation(p *procState, span *request.Span, req *re
 		calls:      calls,
 	}
 	cr.prefixes, cr.cut = historyPrefixes(t.seed, req.history)
+	if cr.cut {
+		cr.historyIDs = historyCallIDs(req.history)
+	}
 
 	resolved := c.resolve(&cr)
 	if resolved.link == request.ConversationLinkUnknown || resolved.link == request.ConversationLinkNew ||
@@ -160,7 +194,9 @@ func historyPrefixes(seed maphash.Seed, history []byte) ([]historyPrefix, bool) 
 // resolve finds the conversation a request continues: the one of the stored
 // response, else the one whose tool calls it answers, else the one whose
 // longest history it resends. Evidence that points to several conversations
-// is ambiguous: the request then starts a conversation of its own.
+// is ambiguous: the request then starts a conversation of its own. A history
+// the capture cut is no prefix evidence: only the ids its captured part
+// carries tie it to a conversation.
 func (c *conversations) resolve(cr *conversationRequest) conversationLink {
 	if cr.prevRespID != "" {
 		if key, ok := c.responses[cr.prevRespID]; ok {
@@ -169,13 +205,23 @@ func (c *conversations) resolve(cr *conversationRequest) conversationLink {
 	}
 
 	var byCall []uint64
+	addOwner := func(id string) {
+		if !distinctiveID(id) {
+			return
+		}
+		owner, ok := c.calls[id]
+		if !ok || owner.shared {
+			return
+		}
+		if key := c.canonical(owner.key); !slices.Contains(byCall, key) {
+			byCall = append(byCall, key)
+		}
+	}
 	for _, r := range cr.results {
-		if !distinctiveID(r.ID) {
-			continue
-		}
-		if key, ok := c.calls[r.ID]; ok && !slices.Contains(byCall, c.canonical(key)) {
-			byCall = append(byCall, c.canonical(key))
-		}
+		addOwner(r.ID)
+	}
+	for _, id := range cr.historyIDs {
+		addOwner(id)
 	}
 	switch len(byCall) {
 	case 0:
@@ -185,7 +231,10 @@ func (c *conversations) resolve(cr *conversationRequest) conversationLink {
 		return conversationLink{link: request.ConversationLinkAmbiguous}
 	}
 
-	if keys := c.longestPrefix(cr.prefixes, cr.cut); len(keys) > 0 {
+	if cr.cut {
+		return conversationLink{link: request.ConversationLinkUnknown}
+	}
+	if keys := c.longestPrefix(cr.prefixes); len(keys) > 0 {
 		if len(keys) > 1 {
 			return conversationLink{link: request.ConversationLinkAmbiguous}
 		}
@@ -197,13 +246,9 @@ func (c *conversations) resolve(cr *conversationRequest) conversationLink {
 
 // longestPrefix returns the conversations whose history the request resends
 // with the most bytes. A request continues a history only when it appends
-// turns to it: the last prefix counts only when the capture cut the request.
-func (c *conversations) longestPrefix(prefixes []historyPrefix, cut bool) []uint64 {
-	last := len(prefixes) - 1
-	if !cut {
-		last--
-	}
-	for i := last; i >= 0; i-- {
+// turns to it: its own whole history does not count.
+func (c *conversations) longestPrefix(prefixes []historyPrefix) []uint64 {
+	for i := len(prefixes) - 2; i >= 0; i-- {
 		var keys []uint64
 		for _, seen := range c.prefixes[prefixes[i].hash] {
 			if seen.len == prefixes[i].len && !slices.Contains(keys, c.canonical(seen.key)) {
@@ -219,9 +264,10 @@ func (c *conversations) longestPrefix(prefixes []historyPrefix, cut bool) []uint
 }
 
 // register remembers what later requests of the conversation may resend: the
-// request's history, its response and the calls the response requested.
+// request's history, its response and the calls the response requested. The
+// history of a cut request is not known as a whole and is not remembered.
 func (c *conversations) register(cr *conversationRequest, key uint64) {
-	if n := len(cr.prefixes); n > 0 {
+	if n := len(cr.prefixes); n > 0 && !cr.cut {
 		c.addPrefix(historyPrefix{len: cr.prefixes[n-1].len, hash: cr.prefixes[n-1].hash, key: key})
 	}
 	if cr.responseID != "" {
@@ -233,16 +279,98 @@ func (c *conversations) register(cr *conversationRequest, key uint64) {
 		c.responses[cr.responseID] = key
 	}
 	for _, tc := range cr.calls {
-		if !distinctiveID(tc.ID) {
+		if !conversationCallID(tc.ID, tc.Name) {
 			continue
 		}
-		if _, ok := c.calls[tc.ID]; !ok {
+		owner, ok := c.calls[tc.ID]
+		if !ok {
 			c.callIDs = appendBounded(c.callIDs, tc.ID, maxConversationCalls, func(id string) {
 				delete(c.calls, id)
 			})
+			c.calls[tc.ID] = callOwner{key: key}
+			continue
 		}
-		c.calls[tc.ID] = key
+		if !owner.shared && c.canonical(owner.key) != c.canonical(key) {
+			c.calls[tc.ID] = callOwner{shared: true}
+		}
 	}
+}
+
+// conversationCallID tells whether a call id can tie a request to the
+// conversation whose response issued it: it is distinctive, and not a
+// position number decorated with the tool's name.
+func conversationCallID(id, name string) bool {
+	if !distinctiveID(id) {
+		return false
+	}
+	rest := id
+	if name != "" {
+		rest = strings.ReplaceAll(rest, name, "")
+	}
+	for _, prefix := range callIDPrefixes {
+		rest = strings.TrimPrefix(rest, prefix)
+	}
+
+	random := 0
+	for _, run := range strings.FieldsFunc(rest, func(r rune) bool { return !isAlnum(r) }) {
+		if strings.ContainsFunc(run, isLetter) {
+			random += len(run)
+		}
+	}
+	return random >= minRandomIDChars
+}
+
+func isAlnum(r rune) bool {
+	return isLetter(r) || (r >= '0' && r <= '9')
+}
+
+func isLetter(r rune) bool {
+	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
+}
+
+// historyCallIDs returns the tool-call ids of the turns a history carries,
+// read from the raw bytes because the capture cut it: the assistant turns
+// that requested calls and the results that answered them.
+func historyCallIDs(history []byte) []string {
+	var ids []string
+	for _, key := range historyIDKeys {
+		for from := 0; len(ids) < maxHistoryCallIDs; {
+			i := bytes.Index(history[from:], key)
+			if i < 0 {
+				break
+			}
+			from += i + len(key)
+			if id, ok := jsonStringAfterColon(history, from); ok && !slices.Contains(ids, id) {
+				ids = append(ids, id)
+			}
+		}
+	}
+	return ids
+}
+
+// jsonStringAfterColon reads the JSON string value that follows a key
+// ending at i, without escapes: ids have none.
+func jsonStringAfterColon(raw []byte, i int) (string, bool) {
+	i = skipSpace(raw, i)
+	if i >= len(raw) || raw[i] != ':' {
+		return "", false
+	}
+	i = skipSpace(raw, i+1)
+	if i >= len(raw) || raw[i] != '"' {
+		return "", false
+	}
+	end := bytes.IndexAny(raw[i+1:], `"\`)
+	if end < 0 || raw[i+1+end] != '"' {
+		return "", false
+	}
+	return string(raw[i+1 : i+1+end]), true
+}
+
+func skipSpace(raw []byte, i int) int {
+	for i < len(raw) && strings.IndexByte(jsonSpace, raw[i]) >= 0 {
+		i++
+	}
+	return i
 }
 
 func (c *conversations) addPrefix(prefix historyPrefix) {
@@ -294,6 +422,13 @@ func (c *conversations) addUnresolved(cr *conversationRequest, key uint64) {
 			u.resultIDs = append(u.resultIDs, r.ID)
 		}
 	}
+	// a cut request's results are cut off, but its captured turns name the
+	// calls of the responses it continues
+	for _, id := range cr.historyIDs {
+		if distinctiveID(id) && !slices.Contains(u.resultIDs, id) {
+			u.resultIDs = append(u.resultIDs, id)
+		}
+	}
 	if len(c.unresolved) >= maxUnresolvedPerProcess {
 		c.unresolved = append(c.unresolved[:0], c.unresolved[1:]...)
 	}
@@ -338,21 +473,20 @@ func (u *unresolvedRequest) continues(cr *conversationRequest) bool {
 		return true
 	}
 	for _, id := range u.resultIDs {
-		if slices.ContainsFunc(cr.calls, func(tc request.ToolCall) bool { return tc.ID == id }) {
+		if slices.ContainsFunc(cr.calls, func(tc request.ToolCall) bool {
+			return tc.ID == id && conversationCallID(tc.ID, tc.Name)
+		}) {
 			return true
 		}
 	}
 
+	// a cut history is known neither as a whole nor up to where it continues
 	n := len(cr.prefixes)
-	if n == 0 {
+	if n == 0 || cr.cut || u.cut {
 		return false
 	}
 	own := cr.prefixes[n-1]
-	last := len(u.prefixes) - 1
-	if !u.cut {
-		last--
-	}
-	for i := last; i >= 0; i-- {
+	for i := len(u.prefixes) - 2; i >= 0; i-- {
 		if p := u.prefixes[i]; p.len == own.len && p.hash == own.hash {
 			return true
 		}

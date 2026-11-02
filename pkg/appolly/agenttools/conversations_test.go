@@ -5,6 +5,8 @@ package agenttools
 
 import (
 	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -162,16 +164,96 @@ func TestConversationReorderedPredecessorAdopts(t *testing.T) {
 	assert.Equal(t, first.Key, third.Key)
 }
 
-func TestConversationCutHistoryContinues(t *testing.T) {
+func TestConversationCutHistoryLinksByItsCallIDs(t *testing.T) {
 	tr := testTracker(testConfig())
 	c := newChat("long task")
 	full := c.answer(callA1).history()
-	// both requests were cut by the capture, the second after more turns
+	// both requests were cut by the capture, the second after more turns: its
+	// captured part names the call the first response requested
 	first := annotated(t, tr, inference(0, 10*ms, full[:len(full)-1], call(callA2, "run_command", `{}`)))
 	more := c.answer(callA2).history()
-	second := annotated(t, tr, inference(20*ms, 30*ms, more[:len(full)+5]))
+	second := annotated(t, tr, inference(20*ms, 30*ms, more[:len(full)+80]))
 	assert.Equal(t, first.Key, second.Key)
-	assert.Equal(t, request.ConversationLinkHistoryPrefix, second.Link)
+	assert.Equal(t, request.ConversationLinkCallID, second.Link)
+}
+
+// a cut history is no prefix evidence: conversations that start with the
+// same document share every prefix the capture kept
+func TestConversationCutHistoriesAreNotLinkedByPrefix(t *testing.T) {
+	tr := testTracker(testConfig())
+	doc := strings.Repeat("shared reference document ", 400)
+	var keys []uint64
+	for i, q := range []string{"question zero", "question one", "question two"} {
+		h := `[{"role":"system","content":"s"},{"role":"user","content":"` + doc + q + `"}]`
+		cut := h[:len(h)-len(q)-40]
+		a := annotated(t, tr, inference(int64(i)*100*ms, int64(i)*100*ms+10*ms, cut, call(fmt.Sprintf("call_cutTwin%04dxyz", i), "read_doc", `{}`)))
+		assert.Equal(t, request.ConversationLinkNew, a.Link, q)
+		assert.NotContains(t, keys, a.Key, q)
+		keys = append(keys, a.Key)
+	}
+}
+
+// the part a cut request kept is not remembered as a whole history
+func TestConversationCutRequestIsNotRemembered(t *testing.T) {
+	tr := testTracker(testConfig())
+	cut := `[{"role":"system","content":"s"},{"role":"user","content":"a long docu`
+	a := annotated(t, tr, inference(0, 10*ms, cut))
+	other := `[{"role":"system","content":"s"},{"role":"user","content":"another task"}]`
+	b := annotated(t, tr, inference(20*ms, 30*ms, other))
+	assert.NotEqual(t, a.Key, b.Key)
+	assert.Equal(t, request.ConversationLinkNew, b.Link)
+}
+
+// servers that number calls by position issue the same ids in every
+// conversation: they are no evidence, the histories tell
+func TestConversationPositionalCallIDs(t *testing.T) {
+	tr := testTracker(testConfig())
+	a, b := newChat("user zero asks"), newChat("user one asks")
+	const id = "functions.read_doc:0"
+
+	a1 := annotated(t, tr, inference(0, 10*ms, a.history(), call(id, "read_doc", `{}`)))
+	b1 := annotated(t, tr, inference(5*ms, 15*ms, b.history(), call(id, "read_doc", `{}`)))
+	a2 := annotated(t, tr, inference(20*ms, 30*ms, a.answer(id).history()))
+	b2 := annotated(t, tr, inference(25*ms, 35*ms, b.answer(id).history()))
+
+	assert.NotEqual(t, a1.Key, b1.Key)
+	assert.Equal(t, a1.Key, a2.Key)
+	assert.Equal(t, request.ConversationLinkHistoryPrefix, a2.Link)
+	assert.Equal(t, b1.Key, b2.Key)
+	assert.Equal(t, request.ConversationLinkHistoryPrefix, b2.Link)
+}
+
+// an id that two conversations' responses issued points to neither
+func TestConversationSharedCallIDIsNoEvidence(t *testing.T) {
+	tr := testTracker(testConfig())
+	a, b := newChat("hello"), newChat("hello")
+	const id = "call_r3peatedId0001"
+
+	a1 := annotated(t, tr, inference(0, 10*ms, a.history(), call(id, "read_file", `{}`)))
+	b1 := annotated(t, tr, inference(5*ms, 15*ms, b.history(), call(id, "read_file", `{}`)))
+	// the same history and the same id: nothing tells which conversation it is
+	b2 := annotated(t, tr, inference(20*ms, 30*ms, b.answer(id).history()))
+	assert.NotEqual(t, a1.Key, b1.Key)
+	assert.Equal(t, request.ConversationLinkAmbiguous, b2.Link)
+	assert.NotEqual(t, a1.Key, b2.Key)
+	assert.NotEqual(t, b1.Key, b2.Key)
+}
+
+func TestConversationCallID(t *testing.T) {
+	for id, want := range map[string]bool{
+		"call_conversationA_0001":            true,
+		"call_r3adFile0001":                  true,
+		"toolu_01A09q90qw90lq917835lq9":      true,
+		"chatcmpl-tool-9f8e7d6c5b4a39281706": true,
+		"call_aaaaaaaaaaaa":                  true,
+		"functions.read_doc:0":               false,
+		"functions.read_doc:12":              false,
+		"tool_call_000001":                   false,
+		"call_read_doc_17":                   false,
+		"call_0_0":                           false,
+	} {
+		assert.Equal(t, want, conversationCallID(id, "read_doc"), id)
+	}
 }
 
 func TestConversationNestedSubAgentIsAnotherConversation(t *testing.T) {
