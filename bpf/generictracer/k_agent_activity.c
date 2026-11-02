@@ -41,14 +41,8 @@ int GUARDED_PROG(obi_raw_tp_agent_fork, struct bpf_raw_tracepoint_args *, ctx) {
         return 0;
     }
 
-    const struct task_struct *child = (const struct task_struct *)ctx->args[1];
-    const u32 child_pid = BPF_CORE_READ(child, pid);
-    const u32 child_tgid = BPF_CORE_READ(child, tgid);
-    if (child_pid != child_tgid) {
-        return 0;
-    }
-
-    // the forking task is the current one
+    // the forking task is the current one; most of them are not tracked, which
+    // is told without reading the child
     const u64 id = bpf_get_current_pid_tgid();
     const u32 parent = id >> 32;
     agent_root_t root = {};
@@ -56,8 +50,15 @@ int GUARDED_PROG(obi_raw_tp_agent_fork, struct bpf_raw_tracepoint_args *, ctx) {
         return 0;
     }
 
+    const struct task_struct *child = (const struct task_struct *)ctx->args[1];
+    const u32 child_pid = BPF_CORE_READ(child, pid);
+    const u32 child_tgid = BPF_CORE_READ(child, tgid);
+    if (child_pid != child_tgid) {
+        return 0;
+    }
+
     u32 depth = 0;
-    const agent_lineage_t *parent_lineage = bpf_map_lookup_elem(&agent_lineage, &parent);
+    const agent_lineage_t *parent_lineage = agent_lineage_of(parent);
     if (parent_lineage) {
         depth = parent_lineage->depth;
     }
@@ -67,7 +68,11 @@ int GUARDED_PROG(obi_raw_tp_agent_fork, struct bpf_raw_tracepoint_args *, ctx) {
 
     const agent_lineage_t lineage = {
         .root_pid = root.pid, .depth = depth + 1, .root_start = root.start};
-    bpf_map_update_elem(&agent_lineage, &child_tgid, &lineage, BPF_ANY);
+    if (bpf_map_update_elem(&agent_lineage, &child_tgid, &lineage, BPF_NOEXIST) == 0) {
+        __sync_fetch_and_add(&agent_lineage_entries, 1);
+    } else {
+        bpf_map_update_elem(&agent_lineage, &child_tgid, &lineage, BPF_ANY);
+    }
 
     const u64 now = bpf_ktime_get_ns();
     agent_rate_flush(&root, now);
@@ -97,7 +102,7 @@ int GUARDED_PROG(obi_raw_tp_agent_exec, struct bpf_raw_tracepoint_args *, ctx) {
 
     const u64 id = bpf_get_current_pid_tgid();
     const u32 tgid = id >> 32;
-    const agent_lineage_t *lineage = bpf_map_lookup_elem(&agent_lineage, &tgid);
+    const agent_lineage_t *lineage = agent_lineage_of(tgid);
     if (!lineage) {
         return 0;
     }
@@ -191,7 +196,9 @@ int GUARDED_PROG(obi_raw_tp_agent_exit, struct bpf_raw_tracepoint_args *, ctx) {
         agent_activity_count_drop();
     }
 
-    bpf_map_delete_elem(&agent_lineage, &tgid);
+    if (bpf_map_delete_elem(&agent_lineage, &tgid) == 0) {
+        __sync_fetch_and_add(&agent_lineage_entries, -1);
+    }
     if (root.pid == tgid) {
         // a later process reusing the pid is not known to be an agent
         bpf_map_delete_elem(&agent_roots, &tgid);

@@ -42,6 +42,20 @@ typedef struct agent_root {
     u8 _pad[4];
 } agent_root_t;
 
+// Entries of agent_lineage, never fewer than it holds: a fork adds one, an exit
+// that removes its process's entry takes one back, and evictions are not
+// counted. Every process on the host goes through agent_root() on fork, exec,
+// exit, open and connect; while no descendant of an instrumented process is
+// alive, the common case between tool calls, this spares them the hash lookup.
+u64 agent_lineage_entries = 0;
+
+static __always_inline const agent_lineage_t *agent_lineage_of(const u32 tgid) {
+    if (!agent_lineage_entries) {
+        return NULL;
+    }
+    return bpf_map_lookup_elem(&agent_lineage, &tgid);
+}
+
 static __always_inline void agent_activity_count_drop(void) {
     const u32 zero = 0;
     u64 *drops = bpf_map_lookup_elem(&agent_activity_drops, &zero);
@@ -59,7 +73,7 @@ static __always_inline void agent_activity_count_drop(void) {
 static __always_inline bool agent_root(const u64 id, agent_root_t *root) {
     const u32 tgid = id >> 32;
 
-    const agent_lineage_t *lineage = bpf_map_lookup_elem(&agent_lineage, &tgid);
+    const agent_lineage_t *lineage = agent_lineage_of(tgid);
     if (lineage) {
         root->pid = lineage->root_pid;
         root->start = lineage->root_start;
