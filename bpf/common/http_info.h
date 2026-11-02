@@ -79,8 +79,10 @@ typedef struct http_info {
     u8 submitted;
     enum parent_status parent_status;
     enum event_source_type event_source;
-    u8 response_observation;
+    // host_tid's alignment padding, kept ahead of response_observation, which
+    // must stay the record's last byte (see test_http_response_observation)
     u8 _pad[4];
+    u8 response_observation;
 } http_info_t;
 
 static __always_inline bool still_responding(const http_info_t *info) {
