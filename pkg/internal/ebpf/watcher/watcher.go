@@ -36,9 +36,14 @@ type EventType int
 const (
 	Ready = EventType(iota)
 	NewPort
+	// NewExec reports a process that started running a new program
+	NewExec
 )
 
-const watchBind uint64 = 1
+const (
+	watchBind uint64 = 1
+	watchExec uint64 = 2
+)
 
 type Event struct {
 	Type    EventType
@@ -67,7 +72,9 @@ func (p *Watcher) LoadSpecs() ([]*ebpfcommon.SpecBundle, error) {
 }
 
 func (p *Watcher) constants() map[string]any {
-	return map[string]any{"g_bpf_debug": p.cfg.EBPF.BpfDebug}
+	constants := ebpfcommon.PIDFilterConstants()
+	constants["g_bpf_debug"] = p.cfg.EBPF.BpfDebug
+	return constants
 }
 
 func (p *Watcher) AddCloser(c ...io.Closer) {
@@ -86,7 +93,16 @@ func (p *Watcher) KProbes() map[string]ebpfcommon.ProbeDesc {
 }
 
 func (p *Watcher) Tracepoints() map[string]ebpfcommon.ProbeDesc {
-	return nil
+	if !p.cfg.Discovery.ExecEvents {
+		return nil
+	}
+
+	return map[string]ebpfcommon.ProbeDesc{
+		"sched/sched_process_exec": {
+			Required: true,
+			Start:    p.bpfObjects.ObiTpSchedProcessExec,
+		},
+	}
 }
 
 func (p *Watcher) Run(ctx context.Context) {
@@ -130,16 +146,27 @@ func (p *Watcher) processWatchEvent(ctx context.Context, record *ringbuf.Record)
 		return request.Span{}, true, err
 	}
 
-	if flags == watchBind { // socket bind
-		err = binary.Read(bytes.NewBuffer(record.RawSample), binary.LittleEndian, &event)
-		if err != nil {
-			return request.Span{}, true, err
-		}
+	var forwarded Event
+	switch flags {
+	case watchBind:
+		forwarded.Type = NewPort
+	case watchExec:
+		forwarded.Type = NewExec
+	default:
+		return request.Span{}, true, nil
+	}
 
+	err = binary.Read(bytes.NewBuffer(record.RawSample), binary.LittleEndian, &event)
+	if err != nil {
+		return request.Span{}, true, err
+	}
+	forwarded.Payload = uint32(event.Payload)
+
+	if forwarded.Type == NewPort {
 		p.log.Debug("New port bind event", "port", event.Payload)
-		if err := p.sendEvent(ctx, Event{Type: NewPort, Payload: uint32(event.Payload)}); err != nil {
-			return request.Span{}, true, err
-		}
+	}
+	if err := p.sendEvent(ctx, forwarded); err != nil {
+		return request.Span{}, true, err
 	}
 
 	return request.Span{}, true, nil

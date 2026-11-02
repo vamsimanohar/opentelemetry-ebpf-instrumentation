@@ -46,9 +46,42 @@ func TestProcessWatchEventEmitsDecodedBind(t *testing.T) {
 	assertNoEvent(t, events)
 }
 
+func TestProcessWatchEventEmitsDecodedExec(t *testing.T) {
+	events := make(chan Event, 2)
+	sample := watchSample(watchExec)
+	binary.LittleEndian.PutUint64(sample[8:], 4242)
+
+	_, ignore, err := New(&obi.Config{}, events).processWatchEvent(t.Context(), &ringbuf.Record{RawSample: sample})
+	if err != nil || !ignore {
+		t.Fatalf("process exec event: ignore=%t, error=%v", ignore, err)
+	}
+	if event := testutil.ReadChannel(t, events, time.Second); event != (Event{Type: NewExec, Payload: 4242}) {
+		t.Fatalf("unexpected event: %+v", event)
+	}
+	assertNoEvent(t, events)
+
+	if _, _, err := New(&obi.Config{}, events).processWatchEvent(t.Context(), &ringbuf.Record{RawSample: sample[:12]}); err == nil {
+		t.Error("truncated exec event: expected error")
+	}
+	assertNoEvent(t, events)
+}
+
+func TestExecTracepointFollowsConfig(t *testing.T) {
+	if tp := New(&obi.Config{}, nil).Tracepoints(); len(tp) != 0 {
+		t.Fatalf("exec events are off by default, got %v", tp)
+	}
+
+	cfg := &obi.Config{}
+	cfg.Discovery.ExecEvents = true
+	tp := New(cfg, nil).Tracepoints()
+	if _, ok := tp["sched/sched_process_exec"]; !ok || len(tp) != 1 {
+		t.Fatalf("exec events on: want the sched_process_exec tracepoint, got %v", tp)
+	}
+}
+
 func TestProcessWatchEventIgnoresUnknownFlags(t *testing.T) {
 	events := make(chan Event, 1)
-	_, ignore, err := New(&obi.Config{}, events).processWatchEvent(t.Context(), &ringbuf.Record{RawSample: watchSample(2)[:8]})
+	_, ignore, err := New(&obi.Config{}, events).processWatchEvent(t.Context(), &ringbuf.Record{RawSample: watchSample(0xff)[:8]})
 	if err != nil {
 		t.Fatalf("process unknown event: %v", err)
 	}

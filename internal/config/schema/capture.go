@@ -66,6 +66,7 @@ type CapturePolicy struct {
 	MatchOrder    MatchOrder    `yaml:"match_order"`
 	PollInterval  Duration      `yaml:"poll_interval"`
 	MinProcessAge Duration      `yaml:"min_process_age"`
+	ExecEvents    bool          `yaml:"exec_events"`
 }
 
 // Rule describes one capture policy rule.

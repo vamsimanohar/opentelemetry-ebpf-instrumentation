@@ -127,6 +127,12 @@ type DiscoveryConfig struct {
 	// Min process age to be considered for discovery.
 	MinProcessAge time.Duration `yaml:"min_process_age" env:"OTEL_EBPF_MIN_PROCESS_AGE" validate:"gte=0"`
 
+	// ExecEvents matches a process against the selection criteria as soon as it
+	// runs a new program, from a kernel exec event, instead of at the next poll
+	// once it is older than MinProcessAge. Short-lived processes, such as
+	// one-shot agent CLIs and scripts, are seen only this way. Config v2 only.
+	ExecEvents bool `yaml:"-" env:"OTEL_EBPF_DISCOVERY_EXEC_EVENTS" validate:"boolean"`
+
 	// ProcessContextPollInterval controls how often OBI re-reads the OTEL_CTX
 	// mapping of each discovered process.  Polling handles both SDKs that
 	// publish the mapping after startup and context updates published later.

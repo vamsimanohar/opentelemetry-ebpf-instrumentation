@@ -38,6 +38,9 @@ const (
 	emptyDuration       = time.Duration(0)
 	// procStatBufSize safely fits /proc/<pid>/stat for our parsing path.
 	procStatBufSize = 4096
+	// execQueueLen holds the exec events of a burst; on overflow the processes
+	// are found by the next poll instead.
+	execQueueLen = 4096
 )
 
 // procStatBufPool amortizes stat buffer allocations across all procStatReader callers.
@@ -118,6 +121,12 @@ func ProcessWatcherFunc(
 		ebpfContext:       ebpfContext,
 		rescan:            rescan,
 	}
+	if cfg.Discovery.ExecEvents {
+		acc.execPIDs = make(chan app.PID, execQueueLen)
+		acc.execMayMatch = func(pid app.PID) bool {
+			return execMayMatch(findingCriteria, rescan.enabled(), pid, readExecImage)
+		}
+	}
 	if acc.interval == 0 {
 		acc.interval = defaultPollInterval
 	}
@@ -157,6 +166,11 @@ type pollAccounter struct {
 	rescan            ProcessWatcherRescan
 	// pidsMu protects pids and pidPorts so the rescan goroutine can forget while snapshot runs
 	pidsMu sync.Mutex
+	// processes that ran a new program, from the eBPF watcher; nil unless
+	// Discovery.ExecEvents is set
+	execPIDs chan app.PID
+	// injectable function
+	execMayMatch func(app.PID) bool
 }
 
 func (pa *pollAccounter) run(ctx context.Context) {
@@ -184,24 +198,76 @@ func (pa *pollAccounter) run(ctx context.Context) {
 		go pa.runRescanNotify(ctx, log)
 	}
 
+	// exec events are handled on this goroutine too, so that they never
+	// interleave with a poll's listing and its snapshot
+	pollTimer := time.NewTimer(0)
+	defer pollTimer.Stop()
 	for {
-		procs, err := pa.listProcesses(pa.portFetchRequired())
-		if err != nil {
-			log.Warn("can't get system processes", "error", err)
-		} else {
-			if events := pa.snapshot(procs); len(events) > 0 {
-				log.Debug("new process watching events", "len", len(events))
-				pa.output.Send(events)
-			}
-		}
 		select {
 		case <-ctx.Done():
 			log.Debug("context canceled. Exiting")
 			return
-		case <-time.After(pa.interval):
-			// poll again
+		case <-pollTimer.C:
+			pa.poll(log)
+			pollTimer.Reset(pa.interval)
+		case pid := <-pa.execPIDs:
+			if events := pa.execSnapshot(pa.drainExecPIDs(pid)); len(events) > 0 {
+				log.Debug("new process exec events", "len", len(events))
+				pa.output.Send(events)
+			}
 		}
 	}
+}
+
+func (pa *pollAccounter) poll(log *slog.Logger) {
+	procs, err := pa.listProcesses(pa.portFetchRequired())
+	if err != nil {
+		log.Warn("can't get system processes", "error", err)
+		return
+	}
+
+	if events := pa.snapshot(procs); len(events) > 0 {
+		log.Debug("new process watching events", "len", len(events))
+		pa.output.Send(events)
+	}
+}
+
+// drainExecPIDs returns first and the exec events queued behind it, once each
+func (pa *pollAccounter) drainExecPIDs(first app.PID) []app.PID {
+	pids := []app.PID{first}
+	for {
+		select {
+		case pid := <-pa.execPIDs:
+			if !slices.Contains(pids, pid) {
+				pids = append(pids, pid)
+			}
+		default:
+			return pids
+		}
+	}
+}
+
+// execSnapshot reports processes that ran a new program as created, without
+// waiting for the next poll or for MinProcessAge: at exec time the executable
+// and the command line are final. A process already known runs another
+// program now, so it is reported again; the matcher ignores it if it already
+// matched, and evaluates it again otherwise (e.g. `sh -c` exec'ing a program).
+func (pa *pollAccounter) execSnapshot(pids []app.PID) []Event[ProcessAttrs] {
+	pa.pidsMu.Lock()
+	defer pa.pidsMu.Unlock()
+
+	var events []Event[ProcessAttrs]
+	for _, pid := range pids {
+		if !pa.execMayMatch(pid) {
+			continue
+		}
+
+		proc := ProcessAttrs{pid: pid, detectedType: svc.InstrumentableUnknown, openPorts: []uint32{}}
+		pa.pids[pid] = proc
+		events = append(events, Event[ProcessAttrs]{Type: EventCreated, Obj: proc})
+	}
+
+	return events
 }
 
 // runRescanNotify forgets tracked processes when the dynamic selector changes so they are
@@ -296,10 +362,113 @@ func (pa *pollAccounter) watchForProcessEvents(ctx context.Context, log *slog.Lo
 			if pa.cfg.Port.Matches(port) || portOfInterest(pa.findingCriteria, port) {
 				pa.refetchPorts()
 			}
+		case watcher.NewExec:
+			pa.queueExec(app.PID(e.Payload))
 		default:
 			log.Warn("Unknown ebpf process watch event", "type", e.Type)
 		}
 	})
+}
+
+// execImage is what a process that just exec'd can be told apart by
+type execImage struct {
+	exePath string
+	cmdArgs string
+}
+
+// readExecImage reads the executable and the command line arguments the way
+// processInfo does for the matcher. It fails for a process that is gone.
+func readExecImage(pid app.PID) (execImage, error) {
+	proc := "/proc/" + strconv.Itoa(int(pid))
+	exePath, err := os.Readlink(proc + "/exe")
+	if err != nil {
+		return execImage{}, err
+	}
+
+	cmdline, err := os.ReadFile(proc + "/cmdline")
+	if err != nil {
+		return execImage{}, err
+	}
+	// as gopsutil's Cmdline, without the program name
+	args := strings.Join(strings.FieldsFunc(string(cmdline), func(r rune) bool { return r == 0 }), " ")
+	_, args, _ = strings.Cut(args, " ")
+
+	return execImage{exePath: exePath, cmdArgs: args}, nil
+}
+
+// execMayMatch tells, from the executable and the command line alone, whether
+// a process that just exec'd may match a selector. Every program the host runs
+// raises an exec event, and each one let through costs the full discovery
+// pipeline (decorators, matcher), so the events are filtered here first. The
+// filter errs towards letting a process through: a selector that also needs
+// what is only known later (languages, Kubernetes metadata, containers), or a
+// dynamic selection, lets every process through. Open ports are not known at
+// exec time either; the bind watcher and the poll report those processes.
+func execMayMatch(criteria []services.Selector, dynamic bool, pid app.PID, read func(app.PID) (execImage, error)) bool {
+	image, err := read(pid)
+	if err != nil {
+		// it exited already
+		return false
+	}
+	if dynamic {
+		return true
+	}
+
+	for _, sel := range criteria {
+		if selectorMayMatchExec(sel, pid, image) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func selectorMayMatchExec(sel services.Selector, pid app.PID, image execImage) bool {
+	pids, hasPIDs := sel.GetPIDs()
+	if hasPIDs && len(pids) > 0 && !slices.Contains(pids, pid) {
+		return false
+	}
+	if sel.GetLanguages().IsSet() || sel.IsContainersOnly() || hasKubeCriteria(sel) {
+		return true
+	}
+
+	path, pathRegexp, args := sel.GetPath(), sel.GetPathRegexp(), sel.GetCmdArgs()
+	if !path.IsSet() && !pathRegexp.IsSet() && !args.IsSet() {
+		return hasPIDs && len(pids) > 0
+	}
+
+	switch {
+	case path.IsSet() && !path.MatchString(image.exePath):
+		return false
+	case !path.IsSet() && pathRegexp.IsSet() && !pathRegexp.MatchString(image.exePath):
+		return false
+	case args.IsSet() && !args.MatchString(image.cmdArgs):
+		return false
+	}
+
+	return true
+}
+
+func hasKubeCriteria(sel services.Selector) bool {
+	for range sel.RangeMetadata() {
+		return true
+	}
+	for range sel.RangePodLabels() {
+		return true
+	}
+	for range sel.RangePodAnnotations() {
+		return true
+	}
+	return false
+}
+
+// queueExec never blocks the eBPF event reader: a process that does not fit
+// is found by the next poll.
+func (pa *pollAccounter) queueExec(pid app.PID) {
+	select {
+	case pa.execPIDs <- pid:
+	default:
+	}
 }
 
 func (pa *pollAccounter) processTooNew(proc ProcessAttrs) bool {

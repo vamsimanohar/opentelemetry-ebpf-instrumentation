@@ -6,7 +6,9 @@ package discover
 import (
 	"bytes"
 	"context"
+	"os"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -16,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"go.opentelemetry.io/obi/pkg/appolly/app"
+	"go.opentelemetry.io/obi/pkg/appolly/services"
 	ebpfcommon "go.opentelemetry.io/obi/pkg/ebpf/common"
 	"go.opentelemetry.io/obi/pkg/internal/ebpf/watcher"
 	"go.opentelemetry.io/obi/pkg/internal/testutil"
@@ -377,4 +380,158 @@ func TestForgetPIDs_ReemitsExistingProcess(t *testing.T) {
 	// p2 still not re-emitted
 	events4 := acc.snapshot(procs)
 	assert.Empty(t, events4)
+}
+
+// A process that runs for less than a poll interval is reported from its exec
+// event, ahead of the next poll and regardless of MinProcessAge.
+func TestExecEventsReportProcessesBeforeThePoll(t *testing.T) {
+	cfg := &obi.Config{}
+	cfg.Discovery.ExecEvents = true
+	cfg.Discovery.MinProcessAge = time.Hour
+
+	var mu sync.Mutex
+	alive := map[app.PID]bool{100: true}
+	listed := map[app.PID]ProcessAttrs{100: {pid: 100, processAge: 2 * time.Hour}}
+	watcherEvents := make(chan chan<- watcher.Event, 1)
+
+	acc := pollAccounter{
+		cfg:      cfg,
+		interval: time.Hour, // only the first poll runs
+		pids:     map[app.PID]ProcessAttrs{},
+		pidPorts: map[pidPort]ProcessAttrs{},
+		listProcesses: func(bool) (map[app.PID]ProcessAttrs, error) {
+			return listed, nil
+		},
+		executableReady: func(app.PID) (string, bool) { return "/usr/bin/agent", true },
+		execMayMatch: func(pid app.PID) bool {
+			mu.Lock()
+			defer mu.Unlock()
+			return alive[pid]
+		},
+		loadBPFWatcher: func(_ context.Context, _ *ebpfcommon.EBPFEventContext, _ *obi.Config, events chan<- watcher.Event) error {
+			watcherEvents <- events
+			return nil
+		},
+		loadBPFLogger: func(context.Context, *ebpfcommon.EBPFEventContext, *obi.Config) error {
+			return nil
+		},
+		execPIDs: make(chan app.PID, execQueueLen),
+		output:   msg.NewQueue[[]Event[ProcessAttrs]](msg.ChannelBufferLen(10)),
+	}
+	out := acc.output.Subscribe()
+	go acc.run(t.Context())
+
+	events := testutil.ReadChannel(t, watcherEvents, testTimeout)
+	assert.Equal(t, []Event[ProcessAttrs]{{Type: EventCreated, Obj: listed[100]}},
+		testutil.ReadChannel(t, out, testTimeout), "the first poll")
+
+	mu.Lock()
+	alive[200] = true
+	mu.Unlock()
+	events <- watcher.Event{Type: watcher.NewExec, Payload: 200}
+	// it exited before its event was read
+	events <- watcher.Event{Type: watcher.NewExec, Payload: 300}
+
+	got := testutil.ReadChannel(t, out, testTimeout)
+	require.Len(t, got, 1)
+	assert.Equal(t, EventCreated, got[0].Type)
+	assert.Equal(t, app.PID(200), got[0].Obj.pid)
+
+	// a known process that runs another program is evaluated again
+	events <- watcher.Event{Type: watcher.NewExec, Payload: 100}
+	got = testutil.ReadChannel(t, out, testTimeout)
+	require.Len(t, got, 1)
+	assert.Equal(t, Event[ProcessAttrs]{Type: EventCreated, Obj: ProcessAttrs{pid: 100, openPorts: []uint32{}}}, got[0])
+}
+
+func TestExecSnapshotIsSeenByTheNextPoll(t *testing.T) {
+	acc := pollAccounter{
+		cfg:             &obi.Config{},
+		pids:            map[app.PID]ProcessAttrs{},
+		pidPorts:        map[pidPort]ProcessAttrs{},
+		executableReady: func(app.PID) (string, bool) { return "/usr/bin/agent", true },
+		execMayMatch:    func(app.PID) bool { return true },
+	}
+
+	created := acc.execSnapshot([]app.PID{7})
+	require.Len(t, created, 1)
+
+	// still running at the next poll: not reported twice
+	assert.Empty(t, acc.snapshot(map[app.PID]ProcessAttrs{7: {pid: 7, processAge: time.Millisecond}}))
+
+	// gone by the poll after: reported deleted
+	deleted := acc.snapshot(map[app.PID]ProcessAttrs{})
+	require.Len(t, deleted, 1)
+	assert.Equal(t, EventDeleted, deleted[0].Type)
+	assert.Equal(t, app.PID(7), deleted[0].Obj.pid)
+}
+
+func TestDrainExecPIDsDeduplicates(t *testing.T) {
+	acc := pollAccounter{execPIDs: make(chan app.PID, 4)}
+	for _, pid := range []app.PID{2, 1, 2} {
+		acc.queueExec(pid)
+	}
+
+	assert.Equal(t, []app.PID{1, 2}, acc.drainExecPIDs(1))
+	assert.Empty(t, acc.execPIDs)
+}
+
+func TestQueueExecNeverBlocks(t *testing.T) {
+	acc := pollAccounter{execPIDs: make(chan app.PID, 1)}
+	acc.queueExec(1)
+	acc.queueExec(2) // dropped: the next poll finds it
+
+	assert.Equal(t, []app.PID{1}, acc.drainExecPIDs(<-acc.execPIDs))
+
+	// exec events off: no queue, nothing to block on
+	(&pollAccounter{}).queueExec(3)
+}
+
+func TestExecMayMatch(t *testing.T) {
+	agent := execImage{exePath: "/opt/py/bin/python3.12", cmdArgs: "/srv/agents/run.py --task x"}
+	read := func(pid app.PID) (execImage, error) {
+		if pid == 404 {
+			return execImage{}, os.ErrNotExist
+		}
+		return agent, nil
+	}
+	glob := services.NewGlob
+	agentLabel := glob("agent")
+
+	cases := []struct {
+		name     string
+		selector services.GlobAttributes
+		want     bool
+	}{
+		{"executable matches", services.GlobAttributes{Path: glob("*/python3*")}, true},
+		{"executable differs", services.GlobAttributes{Path: glob("*/node")}, false},
+		{"executable and arguments match", services.GlobAttributes{Path: glob("*/python3*"), CmdArgs: glob("/srv/agents/*")}, true},
+		{"arguments differ", services.GlobAttributes{Path: glob("*/python3*"), CmdArgs: glob("*-m http.server*")}, false},
+		{"ports are not known at exec time", services.GlobAttributes{OpenPorts: services.IntEnum{Ranges: []services.IntRange{{Start: 8080}}}}, false},
+		{"target pid", services.GlobAttributes{PIDs: []uint32{7}}, true},
+		{"other target pid", services.GlobAttributes{PIDs: []uint32{8}, Path: glob("*/python3*")}, false},
+		{"languages are decided later", services.GlobAttributes{Languages: glob("python")}, true},
+		{"containers are decided later", services.GlobAttributes{Path: glob("*/node"), ContainersOnly: true}, true},
+		{"pod labels are decided later", services.GlobAttributes{PodLabels: map[string]*services.GlobAttr{"app": &agentLabel}}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sel := tc.selector
+			assert.Equal(t, tc.want, execMayMatch([]services.Selector{&sel}, false, 7, read))
+		})
+	}
+
+	none := []services.Selector{&services.GlobAttributes{Path: glob("*/node")}}
+	assert.True(t, execMayMatch(none, true, 7, read), "dynamic selection decides later")
+	assert.False(t, execMayMatch(none, true, 404, read), "a process that is gone")
+}
+
+func TestReadExecImage(t *testing.T) {
+	image, err := readExecImage(app.PID(os.Getpid()))
+	require.NoError(t, err)
+
+	exe, err := os.Executable()
+	require.NoError(t, err)
+	assert.Equal(t, exe, image.exePath)
+	assert.Equal(t, strings.Join(os.Args[1:], " "), image.cmdArgs)
 }

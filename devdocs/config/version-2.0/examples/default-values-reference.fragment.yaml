@@ -84,6 +84,8 @@ extensions:
         poll_interval: 0s
         # Ignore very new processes until they are old enough to evaluate.
         min_process_age: 5s
+        # Evaluate processes when they exec instead of at the next poll.
+        exec_events: false
       # rules is an ordered list of workload inclusion/exclusion rules.
       # Writing [] explicitly removes these built-in workload exclusion rules.
       rules:

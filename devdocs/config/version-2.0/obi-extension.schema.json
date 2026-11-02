@@ -549,6 +549,11 @@
           "type": "string",
           "default": "5s",
           "description": "Minimum process age required before a process becomes eligible for selection.\nIf omitted, `5s` is used.\n"
+        },
+        "exec_events": {
+          "type": "boolean",
+          "default": false,
+          "description": "Evaluate a process for selection as soon as it runs a new program, from a kernel exec event, instead of at the next poll once it is older than `min_process_age`. Short-lived processes are only seen this way.\nIf omitted, `false` is used.\n"
         }
       }
     },

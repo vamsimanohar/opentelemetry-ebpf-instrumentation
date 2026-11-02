@@ -70,6 +70,7 @@ func capturePolicy(cfg *obi.Config) schema.CapturePolicy {
 		MatchOrder:    schema.MatchOrderFirstMatchWins,
 		PollInterval:  schema.Duration(cfg.Discovery.PollInterval),
 		MinProcessAge: schema.Duration(cfg.Discovery.MinProcessAge),
+		ExecEvents:    cfg.Discovery.ExecEvents,
 	}
 }
 

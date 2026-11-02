@@ -4,6 +4,7 @@ policy:
     match_order: first_match_wins
     poll_interval: 0s
     min_process_age: 5s
+    exec_events: false
 rules:
     - action: exclude
       name: exclude-obi-and-collectors

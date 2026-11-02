@@ -327,6 +327,7 @@ func applyV2Policy(cfg *obi.Config, policy schema.CapturePolicy, complete bool) 
 	if complete || completePolicy(policy) {
 		cfg.Discovery.PollInterval = policy.PollInterval.TimeDuration()
 		cfg.Discovery.MinProcessAge = policy.MinProcessAge.TimeDuration()
+		cfg.Discovery.ExecEvents = policy.ExecEvents
 		return
 	}
 
@@ -335,6 +336,9 @@ func applyV2Policy(cfg *obi.Config, policy schema.CapturePolicy, complete bool) 
 	}
 	if !zeroValue(policy.MinProcessAge) {
 		cfg.Discovery.MinProcessAge = policy.MinProcessAge.TimeDuration()
+	}
+	if policy.ExecEvents {
+		cfg.Discovery.ExecEvents = true
 	}
 }
 
