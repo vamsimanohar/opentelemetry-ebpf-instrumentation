@@ -23,6 +23,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 
+	"go.opentelemetry.io/obi/pkg/appolly/app/agentact"
 	"go.opentelemetry.io/obi/pkg/appolly/services"
 	"go.opentelemetry.io/obi/pkg/config"
 	"go.opentelemetry.io/obi/pkg/export"
@@ -2080,4 +2081,10 @@ func TestConfig_GenAIToolCallsEnv(t *testing.T) {
 	require.ErrorContains(t, tc.Validate(1024, &cfg.EBPF.PayloadExtraction.HTTP.GenAI), "GenAI payload extractor")
 	cfg.EBPF.PayloadExtraction.HTTP.GenAI.OpenAI.Enabled = true
 	require.NoError(t, tc.Validate(1024, &cfg.EBPF.PayloadExtraction.HTTP.GenAI))
+}
+
+func TestDefaultKernelActivityExcludesBytecodeCaches(t *testing.T) {
+	m := agentact.NewPathMatcher(DefaultConfig.EBPF.PayloadExtraction.HTTP.GenAI.ToolCalls.KernelActivity.PathExclude)
+	assert.True(t, m.Matches("/srv/agent/tools/__pycache__/advlib.cpython-312.pyc"))
+	assert.False(t, m.Matches("/srv/agent/data/pycache_report.txt"))
 }

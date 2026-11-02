@@ -129,6 +129,7 @@ instrumentation:
                         - /dev/
                         - '*/lib/python3*'
                         - site-packages
+                        - __pycache__
                         - node_modules
                         - /etc/ld.so.cache
                         - /lib64/

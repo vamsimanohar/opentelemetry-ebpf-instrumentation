@@ -214,7 +214,7 @@ var DefaultConfig = Config{
 							// runtime internals, interpreter imports, the dynamic loader,
 							// name resolution, and the CA bundles LLM clients reopen
 							PathExclude: []string{
-								"/proc/", "/sys/", "/dev/", "*/lib/python3*", "site-packages", "node_modules",
+								"/proc/", "/sys/", "/dev/", "*/lib/python3*", "site-packages", "__pycache__", "node_modules",
 								"/etc/ld.so.cache", "/lib64/", "/usr/lib64/", "/usr/lib/locale/", "/usr/share/locale/",
 								"/etc/hosts", "/etc/resolv.conf", "/etc/nsswitch.conf", "/etc/gai.conf", "/etc/host.conf",
 								"cacert.pem", "*ca-bundle*", "*ca-certificates*",
