@@ -163,6 +163,11 @@ type ProcessTracer struct {
 	closeErr                  error
 	nextExecutableGeneration  uint64
 	instrumentableGenerations map[ExecutableKey]uint64
+	// processes whose module uprobes are still to be attached
+	pendingMu        sync.Mutex
+	pendingUprobes   map[app.PID]struct{}
+	instanceAttaches sync.WaitGroup
+	instanceReleases sync.WaitGroup
 
 	Type            ProcessTracerType
 	Instrumentables map[ExecutableKey]*instrumenter

@@ -681,6 +681,9 @@ func (ta *traceAttacher) notifyProcessDeletion(ctx context.Context, ie *ebpf.Ins
 			ie.Tracer = tracer
 			ta.OutputTracerEvents.SendCtx(ctx, Event[*ebpf.Instrumentable]{Type: EventDeleted, Obj: ie})
 		} else {
+			// the executable's other processes keep it attached: only this
+			// process's uprobes go
+			tracer.UnlinkProcesses(ie.FileInfo, append([]app.PID{ie.FileInfo.Pid()}, ie.ChildPids...))
 			ta.OutputTracerEvents.SendCtx(ctx, Event[*ebpf.Instrumentable]{Type: EventInstanceDeleted, Obj: ie})
 		}
 	}

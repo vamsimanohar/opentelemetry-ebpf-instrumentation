@@ -285,7 +285,7 @@ func TestInstrumentProbesSkipsMarkedOptionalProbe(t *testing.T) {
 		}},
 	}
 
-	closers, attached, err := i.instrumentProbesWithResults(nil, "", probes)
+	closers, attached, err := i.instrumentProbesWithResults(nil, "", probes, anyProcess)
 	require.NoError(t, err)
 	assert.Empty(t, closers)
 	assert.False(t, attached["skipped_optional_symbol"])
@@ -444,7 +444,7 @@ func TestOptionalProbeAttachmentFailureDoesNotSatisfyGroupPrerequisite(t *testin
 		}},
 	}
 
-	closers, attached, err := i.instrumentProbesWithResults(nil, "", probes)
+	closers, attached, err := i.instrumentProbesWithResults(nil, "", probes, anyProcess)
 
 	require.NoError(t, err)
 	assert.Empty(t, closers)
@@ -460,7 +460,7 @@ func TestZeroLinkProbeDoesNotSatisfyGroupPrerequisite(t *testing.T) {
 		"synthetic-start": {{}},
 	}
 
-	closers, attached, err := i.instrumentProbesWithResults(nil, "", probes)
+	closers, attached, err := i.instrumentProbesWithResults(nil, "", probes, anyProcess)
 
 	require.NoError(t, err)
 	assert.Empty(t, closers)
@@ -936,12 +936,38 @@ func TestUprobesRecordsFallbackExecutableOnceForMultipleProbeMaps(t *testing.T) 
 			},
 		}},
 	}
-	i := instrumenter{modules: map[uint64]struct{}{}}
+	i := instrumenter{}
 
 	require.NoError(t, i.uprobes(pid, &tracer, makeProcMaps("/irrelevant")))
 
-	require.Len(t, tracer.recordedLibs, 1)
-	assert.Contains(t, i.modules, tracer.recordedLibs[0])
+	require.Len(t, i.processModules, 1)
+	require.Len(t, i.processModules[pid], 1)
+	assert.Empty(t, tracer.recordedLibs, "per-process probes are not shared through the tracer")
+}
+
+// a module's offsets are read once per file and reused by the next process that maps it
+func TestUprobesResolvesModuleOffsetsOncePerFile(t *testing.T) {
+	pid := app.PID(os.Getpid())
+	probe := &ebpfcommon.ProbeDesc{}
+	tracer := recordingStubTracer{
+		stubTracer: stubTracer{uprobes: map[string]map[string][]*ebpfcommon.ProbeDesc{
+			"missing-library": {"missing_symbol": {probe}},
+		}},
+	}
+	i := instrumenter{}
+
+	require.NoError(t, i.uprobes(pid, &tracer, makeProcMaps("/irrelevant")))
+	require.Len(t, i.resolvedModules, 1)
+	assert.True(t, probe.Skip, "the missing optional symbol is resolved as skipped")
+
+	// the same file for another process: the cached offsets are used, not re-read
+	delete(i.processModules, pid)
+	probe.Skip = false
+	require.NoError(t, i.uprobes(pid, &tracer, makeProcMaps("/irrelevant")))
+
+	require.Len(t, i.resolvedModules, 1)
+	require.Len(t, i.processModules[pid], 1)
+	assert.False(t, probe.Skip, "offsets were not gathered a second time")
 }
 
 type recordingStubTracer struct {
@@ -1194,12 +1220,10 @@ func TestStaleExecutableUnlinkPreservesReplacement(t *testing.T) {
 	oldInstrumenter := &instrumenter{
 		key:       key,
 		closables: []io.Closer{oldCloser},
-		modules:   map[uint64]struct{}{},
 	}
 	newInstrumenter := &instrumenter{
 		key:       key,
 		closables: []io.Closer{newCloser},
-		modules:   map[uint64]struct{}{},
 	}
 	oldExecutable := &Instrumentable{FileInfo: fileInfo}
 	newExecutable := &Instrumentable{FileInfo: fileInfo}
@@ -1231,7 +1255,6 @@ func TestUprobeTargetSharesInstrumenterUntilLastExecutableUnlinks(t *testing.T) 
 		key:       firstKey,
 		uprobeKey: uprobeKey,
 		closables: []io.Closer{closer},
-		modules:   map[uint64]struct{}{},
 	}
 	pt := &ProcessTracer{
 		log:             slog.Default(),

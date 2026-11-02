@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -17,17 +18,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"go.opentelemetry.io/obi/pkg/appolly/app"
 	"go.opentelemetry.io/obi/pkg/appolly/discover/exec"
 	ebpfcommon "go.opentelemetry.io/obi/pkg/ebpf/common"
 	"go.opentelemetry.io/obi/pkg/export/imetrics"
 	"go.opentelemetry.io/obi/pkg/obi"
 )
-
-type libUnlinkingTracer struct {
-	Tracer
-	mu       sync.Mutex
-	unlinked []uint64
-}
 
 type closeTrackingTracer struct {
 	stubTracer
@@ -50,24 +46,18 @@ func (t *initProbeTracer) KProbes() map[string]ebpfcommon.ProbeDesc {
 
 func (t *initProbeTracer) Required() bool { return true }
 
-func (t *libUnlinkingTracer) UnlinkInstrumentedLib(id uint64) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.unlinked = append(t.unlinked, id)
-}
-
 func TestCloseInstrumentersReleasesEveryExecutableOnce(t *testing.T) {
+	module := &countingCloser{}
 	shared := &instrumenter{
-		closables: []io.Closer{&countingCloser{}, &countingCloser{}},
-		modules:   map[uint64]struct{}{7: {}},
+		closables:      []io.Closer{&countingCloser{}, &countingCloser{}},
+		processModules: map[app.PID]map[uint64][]io.Closer{42: {7: {module}}},
 	}
 	single := &instrumenter{
 		closables: []io.Closer{&countingCloser{}},
 	}
-	tracer := &libUnlinkingTracer{}
 	pt := &ProcessTracer{
 		log:      slog.Default(),
-		Programs: []Tracer{tracer},
+		Programs: []Tracer{&stubTracer{}},
 		Instrumentables: map[ExecutableKey]*instrumenter{
 			{Dev: 1, Ino: 1}: shared,
 			{Dev: 1, Ino: 2}: shared,
@@ -87,7 +77,7 @@ func TestCloseInstrumentersReleasesEveryExecutableOnce(t *testing.T) {
 			assert.Equal(t, int32(1), c.(*countingCloser).closes.Load())
 		}
 	}
-	assert.Equal(t, []uint64{7}, tracer.unlinked)
+	assert.Equal(t, int32(1), module.closes.Load())
 	assert.Empty(t, pt.Instrumentables)
 	assert.Empty(t, pt.instrumentableGenerations)
 }
@@ -151,65 +141,103 @@ func TestInitClosesPartialInitProbesOnRequiredProbeFailure(t *testing.T) {
 	assert.Equal(t, 1, unattemptedProgram.closes)
 }
 
-// an executable that fails to attach is never committed, so its probes and its
-// shared library references are only ever released here
+// an executable that fails to attach is never committed, so its probes and the
+// module probes of its processes are only ever released here
 func TestUnlinkInstrumenterReleasesProbesAndModules(t *testing.T) {
 	baseline := &countingCloser{}
 	group := &reverseCloser{closers: []io.Closer{&countingCloser{}}}
-	tracer := &libUnlinkingTracer{}
-	pt := &ProcessTracer{log: slog.Default(), Programs: []Tracer{tracer}}
+	module := &countingCloser{}
+	pt := &ProcessTracer{log: slog.Default(), Programs: []Tracer{&stubTracer{}}}
 	i := &instrumenter{
-		closables: []io.Closer{baseline, group},
-		modules:   map[uint64]struct{}{11: {}},
+		closables:      []io.Closer{baseline, group},
+		processModules: map[app.PID]map[uint64][]io.Closer{42: {11: {module}}},
 	}
 
 	pt.unlinkInstrumenter(i)
 
 	assert.Equal(t, int32(1), baseline.closes.Load())
 	assert.Equal(t, int32(1), group.closers[0].(*countingCloser).closes.Load())
-	assert.Equal(t, []uint64{11}, tracer.unlinked)
+	assert.Equal(t, int32(1), module.closes.Load())
+	assert.Empty(t, i.processModules)
 }
 
-// blocks every library unlink until all of them are running at once
-type gatedLibTracer struct {
-	Tracer
-	entered sync.WaitGroup
+// blocks every close until all of them are running at once
+type gatedCloser struct {
+	entered *sync.WaitGroup
 	release chan struct{}
 }
 
-func (t *gatedLibTracer) UnlinkInstrumentedLib(uint64) {
-	t.entered.Done()
-	<-t.release
+func (c gatedCloser) Close() error {
+	c.entered.Done()
+	<-c.release
+	return nil
 }
 
-// each released library waits for kernel grace periods, so an executable's libraries are
-// unlinked in parallel with each other and with its own probes
+// each released probe waits for kernel grace periods, so the module probes of an
+// executable's processes are released in parallel with each other and with its own probes
 func TestUnlinkInstrumenterReleasesModulesInParallel(t *testing.T) {
-	modules := map[uint64]struct{}{1: {}, 2: {}, 3: {}}
-	tracer := &gatedLibTracer{release: make(chan struct{})}
-	tracer.entered.Add(len(modules))
-	pt := &ProcessTracer{log: slog.Default(), Programs: []Tracer{tracer}}
+	var entered sync.WaitGroup
+	release := make(chan struct{})
+	gated := gatedCloser{entered: &entered, release: release}
+	i := &instrumenter{
+		closables: []io.Closer{gated},
+		processModules: map[app.PID]map[uint64][]io.Closer{
+			1: {1: {gated}, 2: {gated}},
+			2: {1: {gated}},
+		},
+	}
+	entered.Add(4)
+	pt := &ProcessTracer{log: slog.Default(), Programs: []Tracer{&stubTracer{}}}
 
 	unlinked := make(chan struct{})
 	go func() {
-		pt.unlinkInstrumenter(&instrumenter{closables: []io.Closer{&countingCloser{}}, modules: modules})
+		pt.unlinkInstrumenter(i)
 		close(unlinked)
 	}()
 
 	allEntered := make(chan struct{})
 	go func() {
-		tracer.entered.Wait()
+		entered.Wait()
 		close(allEntered)
 	}()
 	select {
 	case <-allEntered:
 	case <-time.After(5 * time.Second):
-		close(tracer.release)
-		require.Fail(t, "the libraries of one executable were unlinked one at a time")
+		close(release)
+		require.Fail(t, "the module probes of one executable were released one at a time")
 	}
 
-	close(tracer.release)
+	close(release)
 	<-unlinked
+}
+
+// a process that ends while others run its executable releases only its own module probes
+func TestUnlinkProcessesReleasesOnlyTheirModules(t *testing.T) {
+	ended, child, other, executable := &countingCloser{}, &countingCloser{}, &countingCloser{}, &countingCloser{}
+	key := ExecutableKey{Dev: 1, Ino: 1}
+	i := &instrumenter{
+		key:       key,
+		closables: []io.Closer{executable},
+		processModules: map[app.PID]map[uint64][]io.Closer{
+			10: {7: {ended}},
+			11: {7: {child}},
+			20: {7: {other}},
+		},
+	}
+	pt := &ProcessTracer{
+		log:             slog.Default(),
+		Programs:        []Tracer{&stubTracer{}},
+		Instrumentables: map[ExecutableKey]*instrumenter{key: i},
+	}
+
+	pt.UnlinkProcesses(exec.New(exec.Init{Dev: 1, Ino: 1}), []app.PID{10, 11})
+	pt.instanceReleases.Wait()
+
+	assert.Equal(t, int32(1), ended.closes.Load())
+	assert.Equal(t, int32(1), child.closes.Load())
+	assert.Equal(t, int32(0), other.closes.Load())
+	assert.Equal(t, int32(0), executable.closes.Load())
+	assert.Equal(t, map[app.PID]map[uint64][]io.Closer{20: {7: {other}}}, i.processModules)
 }
 
 // shutdown may not clear the committed set while an attachment is between its
@@ -235,7 +263,6 @@ func TestCloseInstrumentersWaitsForInFlightAttachment(t *testing.T) {
 		pt.commitInstrumenter(&instrumenter{
 			key:       ExecutableKey{Dev: 1, Ino: 1},
 			closables: []io.Closer{attached},
-			modules:   map[uint64]struct{}{},
 		}, &Instrumentable{})
 	}()
 
@@ -258,4 +285,101 @@ func TestNewExecutableRejectedAfterShutdown(t *testing.T) {
 		FileInfo: exec.New(exec.Init{Dev: 1, Ino: 2}),
 	}), errTracerStopped)
 	assert.Empty(t, pt.Instrumentables)
+}
+
+// the module uprobes of a later process are attached in the background, for that process
+func TestInstanceUprobesAttachInTheBackground(t *testing.T) {
+	pt, ie := instanceTracer(t)
+
+	pt.instrumentablesMu.Lock()
+	pt.attachInstanceUprobes(pt.Instrumentables[ie.key], ie.instrumentable, makeProcMaps("/irrelevant"))
+	pt.instrumentablesMu.Unlock()
+	pt.instanceAttaches.Wait()
+
+	assert.Len(t, pt.Instrumentables[ie.key].processModules[ie.pid], 1)
+	assert.Empty(t, pt.pendingUprobes)
+}
+
+// an attachment in progress does not hold up the next process of the executable
+func TestInstanceUprobesDoNotBlockTheNextProcess(t *testing.T) {
+	pt, ie := instanceTracer(t)
+	i := pt.Instrumentables[ie.key]
+
+	i.attachMu.Lock() // an attachment in progress
+	done := make(chan struct{})
+	go func() {
+		pt.instrumentablesMu.Lock()
+		pt.attachInstanceUprobes(i, ie.instrumentable, makeProcMaps("/irrelevant"))
+		pt.instrumentablesMu.Unlock()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		require.Fail(t, "queuing a process waited for another process's attachment")
+	}
+	i.attachMu.Unlock()
+	pt.instanceAttaches.Wait()
+
+	assert.Len(t, i.processModules[ie.pid], 1)
+}
+
+// a released executable attaches no more process uprobes
+func TestInstanceUprobesSkipAReleasedExecutable(t *testing.T) {
+	pt, ie := instanceTracer(t)
+	i := pt.Instrumentables[ie.key]
+
+	i.attachMu.Lock() // the attachment waits its turn
+	pt.instrumentablesMu.Lock()
+	pt.attachInstanceUprobes(i, ie.instrumentable, makeProcMaps("/irrelevant"))
+	pt.instrumentablesMu.Unlock()
+	i.closed = true // what unlinkInstrumenter does
+	i.attachMu.Unlock()
+	pt.instanceAttaches.Wait()
+
+	assert.Empty(t, i.processModules)
+	assert.Empty(t, pt.pendingUprobes)
+}
+
+// a process that ends before its turn, whose pid may then name another
+// process, gets no uprobes
+func TestInstanceUprobesSkipAProcessThatEnded(t *testing.T) {
+	pt, ie := instanceTracer(t)
+
+	i := pt.Instrumentables[ie.key]
+	i.attachMu.Lock() // the attachment waits its turn
+	pt.instrumentablesMu.Lock()
+	pt.attachInstanceUprobes(i, ie.instrumentable, makeProcMaps("/irrelevant"))
+	pt.instrumentablesMu.Unlock()
+	pt.takeUprobesPending(ie.pid) // what UnlinkProcesses does when the process ends
+	i.attachMu.Unlock()
+	pt.instanceAttaches.Wait()
+
+	assert.Empty(t, pt.Instrumentables[ie.key].processModules[ie.pid])
+	assert.Empty(t, pt.pendingUprobes)
+}
+
+type instanceCase struct {
+	key            ExecutableKey
+	pid            app.PID
+	instrumentable *Instrumentable
+}
+
+// a tracer with one committed executable and a later process of it: this test
+// process, with a uprobe library it does not map, which resolves to its own
+// executable
+func instanceTracer(t *testing.T) (*ProcessTracer, instanceCase) {
+	t.Helper()
+	pid := app.PID(os.Getpid())
+	key := ExecutableKey{Dev: 1, Ino: 1}
+	tracer := &stubTracer{uprobes: map[string]map[string][]*ebpfcommon.ProbeDesc{
+		"missing-library": {"missing_symbol": {{}}},
+	}}
+	pt := &ProcessTracer{
+		log:             slog.Default(),
+		Programs:        []Tracer{tracer},
+		Instrumentables: map[ExecutableKey]*instrumenter{key: {key: key}},
+	}
+	ie := &Instrumentable{FileInfo: exec.New(exec.Init{Dev: key.Dev, Ino: key.Ino, Pid: pid})}
+	return pt, instanceCase{key: key, pid: pid, instrumentable: ie}
 }

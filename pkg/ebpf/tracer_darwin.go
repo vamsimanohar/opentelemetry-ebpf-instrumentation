@@ -8,6 +8,7 @@ import (
 
 	"github.com/cilium/ebpf/link"
 
+	"go.opentelemetry.io/obi/pkg/appolly/app"
 	"go.opentelemetry.io/obi/pkg/appolly/app/request"
 	"go.opentelemetry.io/obi/pkg/appolly/discover/exec"
 	ebpfcommon "go.opentelemetry.io/obi/pkg/ebpf/common"
@@ -42,7 +43,10 @@ func (pt *ProcessTracer) Init(_ *ebpfcommon.EBPFEventContext, _ *obi.Config) err
 		"v", pt.shutdownTimeout, "bpffsPath", pt.bpffsPath,
 		"executableGeneration", pt.nextExecutableGeneration,
 		"instrumentableGenerations", pt.instrumentableGenerations,
-		"stopped", pt.stopped)
+		"stopped", pt.stopped,
+		"pendingUprobes", pt.pendingUprobes)
+	pt.instanceAttaches.Wait()
+	pt.instanceReleases.Wait()
 	return nil
 }
 
@@ -62,6 +66,8 @@ func (pt *ProcessTracer) NewExecutableInstance(_ *Instrumentable) error {
 }
 
 func (pt *ProcessTracer) UnlinkExecutable(_ *exec.FileInfo, _ uint64) {}
+
+func (pt *ProcessTracer) UnlinkProcesses(_ *exec.FileInfo, _ []app.PID) {}
 
 func RunUtilityTracer(_ context.Context, _ *ebpfcommon.EBPFEventContext, _ UtilityTracer, _ *obi.Config) error {
 	return nil

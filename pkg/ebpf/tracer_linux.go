@@ -12,6 +12,7 @@ import (
 	"os"
 	"path"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,8 +21,10 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/btf"
 	"github.com/cilium/ebpf/link"
+	"github.com/prometheus/procfs"
 	"golang.org/x/sys/unix"
 
+	"go.opentelemetry.io/obi/pkg/appolly/app"
 	"go.opentelemetry.io/obi/pkg/appolly/app/request"
 	"go.opentelemetry.io/obi/pkg/appolly/discover/exec"
 	common "go.opentelemetry.io/obi/pkg/ebpf/common"
@@ -44,9 +47,22 @@ type instrumenter struct {
 	exePath               string
 	closables             []io.Closer
 	processScopedGoProbes []processScopedGoProbeRegistration
-	modules               map[uint64]struct{}
-	metrics               imetrics.Reporter
-	processName           string
+	// attachMu guards the module uprobes of the processes, which a later
+	// process attaches in the background, without instrumentablesMu
+	attachMu sync.Mutex
+	// the module uprobes of each process, by module inode
+	processModules map[app.PID]map[uint64][]io.Closer
+	// the symbol offsets of each tracer's probes in each module
+	resolvedModules map[resolvedModuleKey][]map[string][]*common.ProbeDesc
+	// released: no more module uprobes
+	closed      bool
+	metrics     imetrics.Reporter
+	processName string
+}
+
+type resolvedModuleKey struct {
+	tracer Tracer
+	ino    uint64
 }
 
 type uprobeTargetResolver interface {
@@ -406,16 +422,12 @@ func (pt *ProcessTracer) NewExecutableInstance(ie *Instrumentable) error {
 		}
 		for _, p := range pt.Programs {
 			p.ProcessBinary(ie.FileInfo)
-			// Uprobes to be used for native module instrumentation points
-			if err := i.uprobes(ie.FileInfo.Pid(), p, maps); err != nil {
-				printVerifierErrorInfo(err)
-				return err
-			}
 			if err := i.usdtProbes(ie.FileInfo.Pid(), ie.FileInfo.Ns(), p, maps); err != nil {
 				printVerifierErrorInfo(err)
 				return err
 			}
 		}
+		pt.attachInstanceUprobes(i, ie, maps)
 	} else {
 		pt.log.Warn("Attempted to update non-existent tracer", "path", ie.FileInfo.CmdExePath(), "pid", ie.FileInfo.Pid())
 	}
@@ -437,7 +449,6 @@ func (pt *ProcessTracer) NewExecutable(exe *link.Executable, ie *Instrumentable)
 		exe:         exe,
 		exePath:     ie.FileInfo.ProExeLinkPath(),
 		offsets:     ie.Offsets, // this is needed for the function offsets, not fields
-		modules:     map[uint64]struct{}{},
 		metrics:     pt.metrics,
 		processName: ie.FileInfo.ExecutableName(),
 	}
@@ -462,7 +473,10 @@ func (pt *ProcessTracer) NewExecutable(exe *link.Executable, ie *Instrumentable)
 		i.uprobeKey = uprobeKey
 		if existing := pt.instrumenterForUprobeTarget(uprobeKey); existing != nil {
 			for _, p := range pt.Programs {
-				if err := existing.uprobes(ie.FileInfo.Pid(), p, maps); err != nil {
+				existing.attachMu.Lock()
+				err := existing.instrumentableUprobes(ie, p, maps)
+				existing.attachMu.Unlock()
+				if err != nil {
 					printVerifierErrorInfo(err)
 					return err
 				}
@@ -487,7 +501,10 @@ func (pt *ProcessTracer) NewExecutable(exe *link.Executable, ie *Instrumentable)
 		}
 
 		// Uprobes to be used for native module instrumentation points
-		if err := i.uprobes(ie.FileInfo.Pid(), p, maps); err != nil {
+		i.attachMu.Lock()
+		err := i.instrumentableUprobes(ie, p, maps)
+		i.attachMu.Unlock()
+		if err != nil {
 			printVerifierErrorInfo(err)
 			return err
 		}
@@ -502,6 +519,97 @@ func (pt *ProcessTracer) NewExecutable(exe *link.Executable, ie *Instrumentable)
 	committed = true
 
 	return nil
+}
+
+// instrumentableUprobes attaches the module uprobes for the instrumentable's
+// process and for each of its children: every uprobe is scoped to one process.
+// maps are the process's own; each child is read separately. The caller holds
+// attachMu.
+func (i *instrumenter) instrumentableUprobes(ie *Instrumentable, p Tracer, maps []*procfs.ProcMap) error {
+	if err := i.uprobes(ie.FileInfo.Pid(), p, maps); err != nil {
+		return err
+	}
+
+	for _, child := range ie.ChildPids {
+		childMaps, err := processMaps(child)
+		if err == nil {
+			err = i.uprobes(child, p, childMaps)
+		}
+		if err != nil {
+			ptlog().Debug("not instrumenting the modules of a child process", "pid", child, "error", err)
+		}
+	}
+
+	return nil
+}
+
+// attachInstanceUprobes attaches, in the background, the module uprobes of a
+// later process of an instrumented executable. They are attached for that
+// process alone, which costs the kernel a walk over every process that maps
+// the file, for each probe: done inline, or under instrumentablesMu, it held
+// up discovery long enough for short-lived processes to end before they were
+// allowed. The caller holds instrumentablesMu.
+func (pt *ProcessTracer) attachInstanceUprobes(i *instrumenter, ie *Instrumentable, maps []*procfs.ProcMap) {
+	pid := ie.FileInfo.Pid()
+	pt.setUprobesPending(pid)
+
+	pt.instanceAttaches.Go(func() {
+		i.attachMu.Lock()
+		defer i.attachMu.Unlock()
+
+		// the process ended and its pid may already name another process, or
+		// the executable was released, before this turn came
+		pending := pt.takeUprobesPending(pid)
+		if !pending || i.closed {
+			return
+		}
+		for _, p := range pt.Programs {
+			if err := i.instrumentableUprobes(ie, p, maps); err != nil {
+				pt.log.Debug("can't attach the uprobes of a process", "pid", pid, "error", err)
+			}
+		}
+	})
+}
+
+func (pt *ProcessTracer) setUprobesPending(pid app.PID) {
+	pt.pendingMu.Lock()
+	defer pt.pendingMu.Unlock()
+	if pt.pendingUprobes == nil {
+		pt.pendingUprobes = map[app.PID]struct{}{}
+	}
+	pt.pendingUprobes[pid] = struct{}{}
+}
+
+// takeUprobesPending tells whether the pid's uprobes are still to be attached, and forgets it
+func (pt *ProcessTracer) takeUprobesPending(pid app.PID) bool {
+	pt.pendingMu.Lock()
+	defer pt.pendingMu.Unlock()
+	_, pending := pt.pendingUprobes[pid]
+	delete(pt.pendingUprobes, pid)
+	return pending
+}
+
+// UnlinkProcesses releases the module uprobes of processes that ended while
+// other processes still run their executable, whose other probes stay attached
+func (pt *ProcessTracer) UnlinkProcesses(info *exec.FileInfo, pids []app.PID) {
+	key := ExecutableKey{Dev: info.Dev(), Ino: info.Ino()}
+
+	pt.instrumentablesMu.Lock()
+	var closers []io.Closer
+	if i, ok := pt.Instrumentables[key]; ok {
+		i.attachMu.Lock()
+		for _, pid := range pids {
+			pt.takeUprobesPending(pid)
+			closers = append(closers, i.takeProcessModules(pid)...)
+		}
+		i.attachMu.Unlock()
+	}
+	pt.instrumentablesMu.Unlock()
+
+	// in the background: each probe waits for kernel grace periods and walks
+	// every process that maps its file, which held up discovery as process
+	// exits came in. The links of an ended process trap no other process
+	pt.instanceReleases.Go(func() { pt.closeInParallel(closers) })
 }
 
 func (pt *ProcessTracer) resolveUprobeTarget(
@@ -619,20 +727,26 @@ func (pt *ProcessTracer) removeInstrumenter(key ExecutableKey, i *instrumenter) 
 	pt.unlinkInstrumenter(i)
 }
 
-// closes in parallel: the kernel waits several RCU grace periods per probe
 func (pt *ProcessTracer) unlinkInstrumenter(i *instrumenter) {
+	closers := slices.Clone(i.closables)
+	i.attachMu.Lock()
+	i.closed = true
+	for pid := range i.processModules {
+		closers = append(closers, i.takeProcessModules(pid)...)
+	}
+	i.attachMu.Unlock()
+	pt.closeInParallel(closers)
+}
+
+// closes in parallel: the kernel waits several RCU grace periods per probe
+func (pt *ProcessTracer) closeInParallel(closers []io.Closer) {
 	var wg sync.WaitGroup
-	for _, c := range i.closables {
+	for _, c := range closers {
 		wg.Go(func() {
 			if err := c.Close(); err != nil {
 				pt.log.Debug("Unable to close on unlink", "closable", c)
 			}
 		})
-	}
-	for ino := range i.modules {
-		for _, p := range pt.Programs {
-			wg.Go(func() { p.UnlinkInstrumentedLib(ino) })
-		}
 	}
 	wg.Wait()
 }

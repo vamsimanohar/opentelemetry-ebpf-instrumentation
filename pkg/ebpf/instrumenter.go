@@ -156,7 +156,7 @@ func (i *instrumenter) goprobes(p Tracer) error {
 
 	i.gatherGoOffsets(goProbes)
 
-	closers, attachedSymbols, err := i.instrumentProbesWithResults(i.exe, i.exePath, goProbes)
+	closers, attachedSymbols, err := i.instrumentProbesWithResults(i.exe, i.exePath, goProbes, anyProcess)
 	if err != nil {
 		return err
 	}
@@ -233,8 +233,9 @@ func (i *instrumenter) instrumentProbes(
 	exe *link.Executable,
 	exePath string,
 	probes map[string][]*ebpfcommon.ProbeDesc,
+	pid app.PID,
 ) ([]io.Closer, error) {
-	closers, _, err := i.instrumentProbesWithResults(exe, exePath, probes)
+	closers, _, err := i.instrumentProbesWithResults(exe, exePath, probes, pid)
 	return closers, err
 }
 
@@ -242,6 +243,7 @@ func (i *instrumenter) instrumentProbesWithResults(
 	exe *link.Executable,
 	exePath string,
 	probes map[string][]*ebpfcommon.ProbeDesc,
+	pid app.PID,
 ) ([]io.Closer, map[string]bool, error) {
 	log := ilog().With("probes", "instrumentProbes")
 
@@ -263,7 +265,7 @@ func (i *instrumenter) instrumentProbesWithResults(
 				continue
 			}
 
-			cls, err := i.uprobe(exe, exePath, probe)
+			cls, err := i.uprobe(exe, exePath, probe, pid)
 
 			switch {
 			case err != nil:
@@ -368,7 +370,7 @@ func (i *instrumenter) instrumentOptionalGoProbeGroup(
 	group ebpfcommon.GoProbeGroup,
 ) []io.Closer {
 	return instrumentOptionalGoProbeGroup(group, func(_ string, probe *ebpfcommon.ProbeDesc) ([]io.Closer, error) {
-		return i.uprobe(exe, exePath, probe)
+		return i.uprobe(exe, exePath, probe, anyProcess)
 	})
 }
 
@@ -711,8 +713,12 @@ func resolveInstrPath(
 	return mappedPath, exeIno, mappedPath, true
 }
 
+// uprobes attaches the module probes for one process only. A uprobe registered
+// without a PID traps in every process that maps the file, instrumented or not,
+// including the containers that share the file's image layer: the kernel
+// registers it on the real inode below overlayfs.
 func (i *instrumenter) uprobes(pid app.PID, p Tracer, maps []*procfs.ProcMap) error {
-	log := ilog().With("probes", "uprobes")
+	log := ilog().With("probes", "uprobes", "pid", pid)
 	if len(maps) == 0 {
 		log.Info("didn't find any process maps, not instrumenting shared libraries", "pid", pid)
 		return nil
@@ -728,17 +734,8 @@ func (i *instrumenter) uprobes(pid app.PID, p Tracer, maps []*procfs.ProcMap) er
 	modules := i.uprobeModules(p, pid, maps, exePath, exeIno, log)
 
 	for instrumentedIno, m := range modules {
-		// We've already instrumented this module for the executable we have in hand, likely another earlier PID
-		if i.hasModule(instrumentedIno) {
-			log.Debug("already instrumented module for executable, ignoring...", "path", m.instrPath, "ino", instrumentedIno)
-			continue
-		}
-
-		// Check if this is a library used by multiple executables. For example, a shared libssl.so between multiple executables.
-		if p.AlreadyInstrumentedLib(instrumentedIno) {
-			log.Debug("module already instrumented by other processes, incrementing reference count", "lib", m.lib, "path", m.instrPath, "ino", instrumentedIno)
-			i.addModule(instrumentedIno)             // remember this mapping for linking/unlinking for this executable instance
-			p.AddInstrumentedLibRef(instrumentedIno) // record one more use of this shared library
+		if i.hasProcessModule(pid, instrumentedIno) {
+			log.Debug("already instrumented module for process, ignoring...", "path", m.instrPath, "ino", instrumentedIno)
 			continue
 		}
 
@@ -748,16 +745,14 @@ func (i *instrumenter) uprobes(pid app.PID, p Tracer, maps []*procfs.ProcMap) er
 			continue
 		}
 
-		closers, instrumented := i.instrumentUprobeModule(libExe, m, log)
+		key := resolvedModuleKey{tracer: p, ino: instrumentedIno}
+		closers, instrumented := i.instrumentUprobeModule(libExe, m, key, pid, log)
 		if !instrumented {
 			continue
 		}
 
-		log.Debug("adding module for instrumenter and incrementing reference count", "path", m.instrPath, "ino", instrumentedIno)
-
-		// We bump the count of uses of the underlying shared library with a new executable
-		p.RecordInstrumentedLib(instrumentedIno, closers)
-		i.addModule(instrumentedIno)
+		log.Debug("adding module for process", "path", m.instrPath, "ino", instrumentedIno)
+		i.addProcessModule(pid, instrumentedIno, closers)
 	}
 
 	return nil
@@ -766,17 +761,14 @@ func (i *instrumenter) uprobes(pid app.PID, p Tracer, maps []*procfs.ProcMap) er
 func (i *instrumenter) instrumentUprobeModule(
 	exe *link.Executable,
 	module *uprobeModule,
+	key resolvedModuleKey,
+	pid app.PID,
 	log *slog.Logger,
 ) ([]io.Closer, bool) {
 	var moduleClosers []io.Closer
 	instrumented := false
-	for _, probes := range module.probes {
-		if err := gatherOffsets(module.instrPath, probes, log); err != nil {
-			log.Debug("error gathering offsets", "error", err)
-			continue
-		}
-
-		closers, err := i.instrumentProbes(exe, module.instrPath, probes)
+	for _, probes := range i.resolveModuleProbes(module, key, log) {
+		closers, err := i.instrumentProbes(exe, module.instrPath, probes, pid)
 		if err != nil {
 			log.Debug("error instrumenting probes", "error", err)
 			continue
@@ -787,6 +779,34 @@ func (i *instrumenter) instrumentUprobeModule(
 	}
 
 	return moduleClosers, instrumented
+}
+
+// resolveModuleProbes reads the symbol offsets of a module once per file: the
+// later processes that map it attach the same offsets.
+func (i *instrumenter) resolveModuleProbes(
+	module *uprobeModule,
+	key resolvedModuleKey,
+	log *slog.Logger,
+) []map[string][]*ebpfcommon.ProbeDesc {
+	if resolved, ok := i.resolvedModules[key]; ok {
+		return resolved
+	}
+
+	resolved := make([]map[string][]*ebpfcommon.ProbeDesc, 0, len(module.probes))
+	for _, probes := range module.probes {
+		if err := gatherOffsets(module.instrPath, probes, log); err != nil {
+			log.Debug("error gathering offsets", "error", err)
+			continue
+		}
+		resolved = append(resolved, probes)
+	}
+
+	if i.resolvedModules == nil {
+		i.resolvedModules = map[resolvedModuleKey][]map[string][]*ebpfcommon.ProbeDesc{}
+	}
+	i.resolvedModules[key] = resolved
+
+	return resolved
 }
 
 func (i *instrumenter) usdtProbes(pid app.PID, ns uint32, p Tracer, maps []*procfs.ProcMap) error {
@@ -964,16 +984,21 @@ func usdtIPMapPIDs(pid app.PID) []app.PID {
 	return pids
 }
 
+// anyProcess attaches a uprobe to every process that maps the file
+const anyProcess app.PID = 0
+
 func (i *instrumenter) uprobe(
 	exe *link.Executable,
 	exePath string,
 	probe *ebpfcommon.ProbeDesc,
+	pid app.PID,
 ) ([]io.Closer, error) {
 	var closers []io.Closer
 
 	if probe.Start != nil {
 		up, err := uprobe.Attach(exe, exePath, probe.Start, uprobe.Options{
 			Addresses: []uint64{probe.StartOffset},
+			PID:       uint32(pid),
 		})
 		if err != nil {
 			if i.metrics != nil {
@@ -996,6 +1021,7 @@ func (i *instrumenter) uprobe(
 		// every RET instruction of the function shares one attachment
 		up, err := uprobe.Attach(exe, exePath, probe.End, uprobe.Options{
 			Addresses: probe.ReturnOffsets,
+			PID:       uint32(pid),
 		})
 		if err != nil {
 			if i.metrics != nil {
@@ -1196,15 +1222,31 @@ func (i *instrumenter) tracing(p Tracer) error {
 	return nil
 }
 
-func (i *instrumenter) hasModule(ino uint64) bool {
-	slog.Debug("looking up module", "instrumenter", i, "ino", ino)
-	_, ok := i.modules[ino]
+// the process module helpers below are called with attachMu held
+func (i *instrumenter) hasProcessModule(pid app.PID, ino uint64) bool {
+	_, ok := i.processModules[pid][ino]
 	return ok
 }
 
-func (i *instrumenter) addModule(ino uint64) {
-	slog.Debug("remembering module for", "instrumenter", i, "ino", ino)
-	i.modules[ino] = struct{}{}
+func (i *instrumenter) addProcessModule(pid app.PID, ino uint64, closers []io.Closer) {
+	if i.processModules == nil {
+		i.processModules = map[app.PID]map[uint64][]io.Closer{}
+	}
+	if i.processModules[pid] == nil {
+		i.processModules[pid] = map[uint64][]io.Closer{}
+	}
+	i.processModules[pid][ino] = closers
+}
+
+// takeProcessModules forgets the module probes of one process and returns them to be closed
+func (i *instrumenter) takeProcessModules(pid app.PID) []io.Closer {
+	var closers []io.Closer
+	for _, moduleClosers := range i.processModules[pid] {
+		closers = append(closers, moduleClosers...)
+	}
+	delete(i.processModules, pid)
+
+	return closers
 }
 
 func isLittleEndian() bool {
