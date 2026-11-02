@@ -773,9 +773,15 @@ int GUARDED_PROG(obi_tp_sched_process_exit, void *, ctx) {
     (void)ctx;
 
     const u64 pid_tgid = bpf_get_current_pid_tgid();
-    bpf_map_delete_elem(&node_manual_ctx_shadow, &pid_tgid);
+    // a delete locks its hash bucket even when the key is absent, as it is for
+    // nearly every exiting thread: look up first
+    if (bpf_map_lookup_elem(&node_manual_ctx_shadow, &pid_tgid)) {
+        bpf_map_delete_elem(&node_manual_ctx_shadow, &pid_tgid);
+    }
     // not obi_ctx__del(): the manual span override writes the entry even when
     // trace context population is off
-    bpf_map_delete_elem(&traces_ctx_v1, &pid_tgid);
+    if (bpf_map_lookup_elem(&traces_ctx_v1, &pid_tgid)) {
+        bpf_map_delete_elem(&traces_ctx_v1, &pid_tgid);
+    }
     return 0;
 }

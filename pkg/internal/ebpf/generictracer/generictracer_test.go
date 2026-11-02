@@ -448,7 +448,7 @@ func readJVMTestBatch(t *testing.T, events <-chan []runtimemetrics.RuntimeMetric
 // The libruby probes sit on symbols the Ruby runtime exercises as a whole, so
 // each symbol set must carry the Ruby version constraint that gates it.
 func TestRubyUProbesAreVersionGated(t *testing.T) {
-	tracer := &Tracer{}
+	tracer := &Tracer{cfg: &obi.DefaultConfig}
 
 	var rubyKeys []string
 	for lib := range tracer.UProbes() {
@@ -489,4 +489,26 @@ func TestSocketFilterIsOptional(t *testing.T) {
 
 	cfg.EBPF.DisableSocketFilter = true
 	assert.Empty(t, (&Tracer{cfg: &cfg}).SocketFilters())
+}
+
+// The probes that only the injected Java and Node.js agents talk to, and the
+// exit cleanup of the entries only they and trace context population write,
+// are left out when nothing uses them: they fire for every process on the host.
+func TestInjectorProbesFollowTheInjectors(t *testing.T) {
+	cfg := obi.DefaultConfig
+	tracer := &Tracer{cfg: &cfg}
+	assert.Contains(t, tracer.KProbes(), "sys_ioctl")
+	assert.Contains(t, tracer.UProbes(), "node")
+	assert.Contains(t, tracer.UProbes(), "libuv.so")
+	assert.Contains(t, tracer.Tracepoints(), "sched/sched_process_exit")
+
+	cfg.Java.Enabled = false
+	cfg.NodeJS.Enabled = false
+	assert.NotContains(t, tracer.KProbes(), "sys_ioctl")
+	assert.NotContains(t, tracer.UProbes(), "node")
+	assert.NotContains(t, tracer.UProbes(), "libuv.so")
+	assert.NotContains(t, tracer.Tracepoints(), "sched/sched_process_exit")
+
+	tracer.traceCtxMapEnabled = true
+	assert.Contains(t, tracer.Tracepoints(), "sched/sched_process_exit")
 }

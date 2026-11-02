@@ -371,10 +371,15 @@ func (p *Tracer) KProbes() map[string]ebpfcommon.ProbeDesc {
 			Required: true,
 			Start:    p.bpfObjects.ObiKprobeInetCskListenStop,
 		},
-		"sys_ioctl": {
+	}
+
+	// the injected Java agent's only channel to the kernel side; every ioctl on
+	// the host would run it for nothing without the agent
+	if p.cfg.Java.Enabled {
+		kp["sys_ioctl"] = ebpfcommon.ProbeDesc{
 			Required: true,
 			Start:    p.bpfObjects.ObiKprobeSysIoctl,
-		},
+		}
 	}
 
 	if p.cfg.EBPF.ContextPropagation.IsEnabled() {
@@ -396,11 +401,14 @@ func (p *Tracer) KProbes() map[string]ebpfcommon.ProbeDesc {
 }
 
 func (p *Tracer) Tracepoints() map[string]ebpfcommon.ProbeDesc {
-	tp := map[string]ebpfcommon.ProbeDesc{
-		"sched/sched_process_exit": {
+	tp := map[string]ebpfcommon.ProbeDesc{}
+	// it clears the per-thread trace context entries only the injected Node.js
+	// agent and the trace context population write, on every thread exit
+	if p.cfg.NodeJS.Enabled || p.traceCtxMapEnabled {
+		tp["sched/sched_process_exit"] = ebpfcommon.ProbeDesc{
 			Required: false,
 			Start:    p.bpfObjects.ObiTpSchedProcessExit,
-		},
+		}
 	}
 	p.agentActivityTracepoints(tp)
 
@@ -485,18 +493,6 @@ func (p *Tracer) UProbes() map[string]map[string][]*ebpfcommon.ProbeDesc {
 				End:      p.bpfObjects.ObiNgxEventConnectPeerRet,
 			}},
 		},
-		"node": {
-			"uv_fs_access": {{
-				Required: false,
-				Start:    p.bpfObjects.ObiUvFsAccess,
-			}},
-		},
-		"libuv.so": {
-			"uv_fs_access": {{
-				Required: false,
-				Start:    p.bpfObjects.ObiUvFsAccess,
-			}},
-		},
 		// Puma request-to-worker correlation. Both symbols are hot in any Ruby
 		// process, so attach only where the correlation can work: Ruby 4.0
 		// stopped routing Class#new through rb_obj_call_init_kw, and outside
@@ -579,6 +575,19 @@ func (p *Tracer) UProbes() map[string]map[string][]*ebpfcommon.ProbeDesc {
 			}},
 		},
 	}
+
+	// the injected Node.js agent signals through uv_fs_access with fake paths
+	if p.cfg.NodeJS.Enabled {
+		nodeAgent := map[string][]*ebpfcommon.ProbeDesc{
+			"uv_fs_access": {{
+				Required: false,
+				Start:    p.bpfObjects.ObiUvFsAccess,
+			}},
+		}
+		m["node"] = nodeAgent
+		m["libuv.so"] = nodeAgent
+	}
+
 	return m
 }
 
