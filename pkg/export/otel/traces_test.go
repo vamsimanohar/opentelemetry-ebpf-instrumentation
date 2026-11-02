@@ -2007,6 +2007,20 @@ func TestGenerateTracesAttributes(t *testing.T) {
 		ensureTraceAttrNotExists(t, spanAttrs, semconv.GenAISystemInstructionsKey)
 	})
 
+	t.Run("Bedrock Converse span", func(t *testing.T) {
+		span := makeBedrockSpan(&request.VendorBedrock{
+			Model:     "anthropic.claude-3-5-sonnet-20241022-v1:0",
+			Operation: request.ChatOperationName,
+		})
+
+		tAttrs := tracesgen.TraceAttributesSelector(&span, map[attr.Name]struct{}{})
+		traces := tracesgen.GenerateTracesWithAttributes(cache, &span.Service, []attribute.KeyValue{}, hostID, groupFromSpanAndAttributes(&span, tAttrs), reporterName)
+
+		exported := traces.ResourceSpans().At(0).ScopeSpans().At(0).Spans().At(0)
+		ensureTraceStrAttr(t, exported.Attributes(), semconv.GenAIOperationNameKey, "chat")
+		assert.Equal(t, "chat anthropic.claude-3-5-sonnet-20241022-v1:0", exported.Name())
+	})
+
 	t.Run("Bedrock span - optional attributes and error", func(t *testing.T) {
 		span := makeBedrockSpan(&request.VendorBedrock{
 			Model: "anthropic.claude-3-5-sonnet-20241022-v1:0",

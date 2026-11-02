@@ -86,6 +86,7 @@ func BedrockSpan(baseSpan *request.Span, req *http.Request, resp *http.Response)
 	_ = json.Unmarshal([]byte(resp.Header.Get("X-Amzn-Bedrock-Output-Token-Count")), &parsedResponse.OutputTokens)
 
 	model := extractBedrockModel(req)
+	operation := bedrockOperation(req)
 	isStream := isBedrockStream(req)
 	guardrailID := extractBedrockGuardrailID(req, resp)
 
@@ -95,6 +96,7 @@ func BedrockSpan(baseSpan *request.Span, req *http.Request, resp *http.Response)
 			Input:       parsedRequest,
 			Output:      parsedResponse,
 			Model:       model,
+			Operation:   operation,
 			IsStream:    isStream,
 			GuardrailID: guardrailID,
 			ToolCalls:   extractBedrockToolCalls(&parsedResponse),
@@ -183,13 +185,32 @@ func extractBedrockModel(req *http.Request) string {
 	return before
 }
 
-// isBedrockStream detects streaming Bedrock calls by checking the URL path
-// for the invoke-with-response-stream suffix.
+const (
+	bedrockConversePath       = "/converse"
+	bedrockConverseStreamPath = "/converse-stream"
+	bedrockInvokeStreamPath   = "invoke-with-response-stream"
+)
+
+// bedrockOperation names the operation from the URL path. Converse and
+// ConverseStream are the Bedrock chat API, which semconv names `chat`.
+// InvokeModel passes a model-specific body through, so it keeps its own name.
+func bedrockOperation(req *http.Request) string {
+	path := strings.TrimSuffix(requestPath(req), "/")
+	if strings.HasSuffix(path, bedrockConversePath) || strings.HasSuffix(path, bedrockConverseStreamPath) {
+		return request.ChatOperationName
+	}
+
+	return request.InvokeModelOperationName
+}
+
+// isBedrockStream detects streaming Bedrock calls from the URL path:
+// InvokeModelWithResponseStream and ConverseStream.
 func isBedrockStream(req *http.Request) bool {
 	if req == nil || req.URL == nil {
 		return false
 	}
-	return strings.Contains(req.URL.Path, "invoke-with-response-stream")
+	return strings.Contains(req.URL.Path, bedrockInvokeStreamPath) ||
+		strings.HasSuffix(strings.TrimSuffix(req.URL.Path, "/"), bedrockConverseStreamPath)
 }
 
 // extractBedrockGuardrailID extracts the guardrail identifier from the

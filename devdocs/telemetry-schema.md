@@ -141,6 +141,10 @@ section empty once drained.
   and the database alone otherwise. Spans and `db.client.operation.duration` series change
   value accordingly, splitting metric series per schema, and span names that fall back to the
   namespace change with it.
+- AWS Bedrock Converse and ConverseStream spans report `gen_ai.operation.name` `chat`, the
+  semconv value for a chat API, instead of `invoke_model`, and their span name changes from
+  `invoke_model {model}` to `chat {model}`; `gen_ai.client.*` series split accordingly.
+  ConverseStream spans also carry `gen_ai.request.stream`. InvokeModel spans are unchanged.
 
 ## Hosting notes
 

@@ -178,7 +178,7 @@ attributes:
     brief: The name of the operation being performed.
     note: >
       OBI reports the provider's own operation vocabulary (e.g.
-      'invoke_model' for Bedrock, 'generation' for Qwen/DashScope,
+      'invoke_model' for Bedrock InvokeModel, 'generation' for Qwen/DashScope,
       'conversation'/'response' for the OpenAI APIs, 'rerank'). A GenAI
       call OBI recognised but whose operation it could not classify
       reports `_OTHER`, so the attribute is always present on a GenAI
@@ -248,7 +248,7 @@ attribute_groups:
   #   `genAIProviderNames` too; a test asserts the two agree.
   # - `gen_ai.operation.name`: re-typed as a plain string. Upstream's note
   #   explicitly recommends system-specific operation names, and OBI emits the
-  #   provider's own vocabulary ('invoke_model' for Bedrock,
+  #   provider's own vocabulary ('invoke_model' for Bedrock InvokeModel,
   #   'conversation'/'response' for the OpenAI APIs, 'rerank', ...),
   #   which upstream's enum has no members for. MCP is not part of this: it
   #   emits only the upstream-defined 'execute_tool', and nothing at all for

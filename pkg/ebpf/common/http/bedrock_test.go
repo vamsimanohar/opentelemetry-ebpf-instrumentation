@@ -193,6 +193,31 @@ func TestBedrockSpan_ExplicitZeroHeaders(t *testing.T) {
 	assert.Zero(t, reportedValue(span.GenAIOutputTokenCount()))
 }
 
+func TestBedrockSpan_OperationFromPath(t *testing.T) {
+	const host = "https://bedrock-runtime.us-east-1.amazonaws.com/model/anthropic.claude-3-5-haiku-20241022-v1:0"
+	cases := []struct {
+		endpoint  string
+		operation string
+		stream    bool
+	}{
+		{"/converse", request.ChatOperationName, false},
+		{"/converse-stream", request.ChatOperationName, true},
+		{"/invoke", request.InvokeModelOperationName, false},
+		{"/invoke-with-response-stream", request.InvokeModelOperationName, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.endpoint, func(t *testing.T) {
+			req := makeRequest(t, http.MethodPost, host+tc.endpoint, bedrockClaudeRequestBody)
+			resp := makePlainResponse(http.StatusOK, bedrockSuccessHeaders(), bedrockClaudeResponseBody)
+
+			span, ok := BedrockSpan(&request.Span{}, req, resp)
+			require.True(t, ok)
+			assert.Equal(t, tc.operation, span.GenAIOperationName())
+			assert.Equal(t, tc.stream, span.GenAI.Bedrock.IsStream)
+		})
+	}
+}
+
 func TestBedrockSpan_ConverseUsage(t *testing.T) {
 	req := makeRequest(t, http.MethodPost,
 		"https://bedrock-runtime.us-east-1.amazonaws.com/model/anthropic.claude-v2/converse",

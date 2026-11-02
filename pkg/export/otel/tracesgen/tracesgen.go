@@ -1432,7 +1432,7 @@ func traceAttributesSelectorInternal(span *request.Span, optionalAttrs map[attr.
 		if span.SubType == request.HTTPSubtypeAWSBedrock && span.GenAI != nil && span.GenAI.Bedrock != nil {
 			ai := span.GenAI.Bedrock
 			attrs = append(attrs, semconv.GenAIProviderNameAWSBedrock)
-			attrs = append(attrs, semconv.GenAIOperationNameKey.String("invoke_model"))
+			attrs = append(attrs, semconv.GenAIOperationNameKey.String(span.GenAIOperationName()))
 			if ai.Model != "" {
 				attrs = append(attrs, semconv.GenAIRequestModel(ai.Model))
 				attrs = append(attrs, semconv.GenAIResponseModel(ai.Model))

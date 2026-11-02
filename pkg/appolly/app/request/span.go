@@ -908,6 +908,7 @@ type VendorBedrock struct {
 	Input       BedrockRequest
 	Output      BedrockResponse
 	Model       string // extracted from URL path: /model/{modelId}/invoke
+	Operation   string // named from the URL path; empty reads as InvokeModelOperationName
 	IsStream    bool
 	GuardrailID string
 	ToolCalls   []ToolCall `json:"-"`
@@ -2718,6 +2719,9 @@ func (s *Span) GenAIOperationName() string {
 		return s.GenAI.OpenAICompatible.OperationName
 	}
 	if s.GenAI.Bedrock != nil {
+		if op := s.GenAI.Bedrock.Operation; op != "" {
+			return op
+		}
 		return InvokeModelOperationName
 	}
 	if s.GenAI.Embedding != nil {
