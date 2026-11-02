@@ -286,7 +286,7 @@ func generateTracesWithAttributes(
 		}
 
 		// Set span attributes
-		m := AttrsToMap(attrs)
+		m := AttrsToMap(limitAttributeValues(attrs))
 		// db.response.error is not a spec attribute, we use it only for
 		// populating the span status message if it's allowed
 		// we fetch it's value and remove it from the final span attributes
