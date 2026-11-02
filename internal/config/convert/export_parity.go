@@ -160,7 +160,10 @@ func payloadExtraction(cfg *obi.Config) schema.PayloadExtraction {
 			Gateways: http.GenAI.OpenAICompatible.Gateways,
 		},
 		GenAIToolCalls: genAIToolCalls(&http.GenAI.ToolCalls),
-		Enrichment:     httpEnrichment(cfg),
+		GenAIShapeDetection: schema.GenAIShapeDetectionPayload{
+			Enabled: http.GenAI.ShapeDetection.Enabled,
+		},
+		Enrichment: httpEnrichment(cfg),
 	}
 }
 

@@ -58,6 +58,10 @@ func OpenAICompatibleSpan(baseSpan *request.Span, req *http.Request, resp *http.
 		return *baseSpan, false
 	}
 
+	return openAICompatibleSpan(baseSpan, req, reqB, respB, matchedGateway.Provider)
+}
+
+func openAICompatibleSpan(baseSpan *request.Span, req *http.Request, reqB, respB []byte, provider string) (request.Span, bool) {
 	parsedRequest := parseOpenAIInput(reqB, isOpenAIResponsesRequest(req))
 	parsedResponse, toolCalls := parseOpenAICompatibleResponse(respB)
 
@@ -82,7 +86,7 @@ func OpenAICompatibleSpan(baseSpan *request.Span, req *http.Request, resp *http.
 	// (e.g. /litellm/v1/chat/completions).
 	parsedResponse.OperationName, parsedResponse.APIType = openAIOperation(requestPath(req))
 
-	parsedResponse.ProviderName = matchedGateway.Provider
+	parsedResponse.ProviderName = provider
 	baseSpan.SubType = request.HTTPSubtypeOpenAICompatible
 	baseSpan.GenAI = &request.GenAI{
 		OpenAICompatible: parsedResponse,

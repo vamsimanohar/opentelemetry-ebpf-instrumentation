@@ -148,6 +148,10 @@ func AnthropicSpan(baseSpan *request.Span, req *http.Request, resp *http.Respons
 		}
 	}
 
+	return anthropicSpan(baseSpan, req, reqB, respB), true
+}
+
+func anthropicSpan(baseSpan *request.Span, req *http.Request, reqB, respB []byte) request.Span {
 	slog.Debug("Anthropic", "request", string(reqB), "response", string(respB))
 
 	parsedRequest := parseAnthropicRequest(reqB)
@@ -180,7 +184,7 @@ func AnthropicSpan(baseSpan *request.Span, req *http.Request, resp *http.Respons
 		},
 	}
 
-	return *baseSpan, true
+	return *baseSpan
 }
 
 // anthropicOperation names the operation from the request path, which is the

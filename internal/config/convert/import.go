@@ -1460,6 +1460,7 @@ func applyFullV2HTTPPayloadExtraction(cfg *obi.Config, payload schema.PayloadExt
 	http.SQLPP.PreparedStatementsCacheSize = payload.SQLPP.PreparedStatementsCacheSize
 	http.GenAI.OpenAICompatible.Gateways = payload.OpenAICompatible.Gateways
 	applyV2GenAIToolCalls(&http.GenAI.ToolCalls, payload.GenAIToolCalls)
+	http.GenAI.ShapeDetection.Enabled = payload.GenAIShapeDetection.Enabled
 	applyFullV2HTTPEnrichment(http, payload.Enrichment)
 }
 
@@ -1497,6 +1498,9 @@ func applyPartialV2HTTPPayloadExtraction(cfg *obi.Config, payload schema.Payload
 	}
 	if !zeroValue(payload.GenAIToolCalls) {
 		applyV2GenAIToolCalls(&http.GenAI.ToolCalls, payload.GenAIToolCalls)
+	}
+	if payload.GenAIShapeDetection.Enabled {
+		http.GenAI.ShapeDetection.Enabled = true
 	}
 	if !zeroValue(payload.Enrichment) {
 		applyPartialV2HTTPEnrichment(http, payload.Enrichment)

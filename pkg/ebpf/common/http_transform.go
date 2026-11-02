@@ -357,6 +357,15 @@ func postProcessHTTPSpan(parseCtx *EBPFParseContext, httpSpan *request.Span, req
 		}
 	}
 
+	// Runs after every vendor detector: it only classifies calls that no header
+	// or host identified.
+	if httpSpan.IsClientSpan() && parseCtx != nil && parseCtx.payloadExtraction.HTTP.GenAI.ShapeDetection.Enabled {
+		span, ok := ebpfhttp.GenAIShapeSpan(httpSpan, req, resp, &parseCtx.payloadExtraction.HTTP.GenAI)
+		if ok {
+			return span
+		}
+	}
+
 	// Parse JSON-RPC once and reuse for both MCP and plain JSON-RPC
 	// detection, since MCP is a protocol layer on top of JSON-RPC.
 	if parseCtx != nil && (parseCtx.payloadExtraction.HTTP.GenAI.MCP.Enabled || parseCtx.payloadExtraction.HTTP.JSONRPC.Enabled) {

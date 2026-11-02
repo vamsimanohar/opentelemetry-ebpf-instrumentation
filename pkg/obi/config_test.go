@@ -236,7 +236,8 @@ discovery:
 						PreparedStatementsCacheSize: 1024,
 					},
 					GenAI: config.GenAIConfig{
-						ToolCalls: DefaultConfig.EBPF.PayloadExtraction.HTTP.GenAI.ToolCalls,
+						ShapeDetection: config.GenAIShapeDetectionConfig{Enabled: true},
+						ToolCalls:      DefaultConfig.EBPF.PayloadExtraction.HTTP.GenAI.ToolCalls,
 					},
 					Enrichment: config.EnrichmentConfig{
 						Policy: config.HTTPParsingPolicy{

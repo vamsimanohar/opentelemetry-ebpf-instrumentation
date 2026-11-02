@@ -204,6 +204,15 @@ type PayloadExtraction struct {
 	Enrichment       HTTPEnrichment          `yaml:"enrichment"`
 	OpenAICompatible OpenAICompatiblePayload `yaml:"openai_compatible"`
 	GenAIToolCalls   GenAIToolCallsPayload   `yaml:"genai_tool_calls"`
+	// GenAIShapeDetection classifies OpenAI- and Anthropic-format calls that
+	// no vendor header or host identifies.
+	GenAIShapeDetection GenAIShapeDetectionPayload `yaml:"genai_shape_detection"`
+}
+
+// GenAIShapeDetectionPayload describes detection of LLM API calls by their
+// endpoint and payload shape.
+type GenAIShapeDetectionPayload struct {
+	Enabled bool `yaml:"enabled"`
 }
 
 // SQLPPPayload describes SQL++ payload extraction settings.

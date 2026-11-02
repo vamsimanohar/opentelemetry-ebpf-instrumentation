@@ -194,6 +194,9 @@ var DefaultConfig = Config{
 					MCP: config.MCPConfig{
 						Enabled: false,
 					},
+					ShapeDetection: config.GenAIShapeDetectionConfig{
+						Enabled: true,
+					},
 					ToolCalls: config.GenAIToolCallsConfig{
 						Enabled:            false,
 						MaxWindow:          10 * time.Minute,

@@ -72,3 +72,41 @@ instrumentation:
 	require.NotEmpty(t, tc.KernelActivity.PathExclude)
 	require.NoError(t, tc.Validate(got.EBPF.BufferSizes.HTTP, &got.EBPF.PayloadExtraction.HTTP.GenAI))
 }
+
+func TestV2GenAIShapeDetection(t *testing.T) {
+	t.Parallel()
+
+	parse := func(t *testing.T, doc string) config.GenAIShapeDetectionConfig {
+		t.Helper()
+		ext, err := schema.ParseReceiverYAML([]byte(doc))
+		require.NoError(t, err)
+		got, err := V2ToRuntime(ext)
+		require.NoError(t, err)
+		return got.EBPF.PayloadExtraction.HTTP.GenAI.ShapeDetection
+	}
+
+	require.True(t, parse(t, `
+version: '2.0'
+instrumentation:
+  http:
+    payload_extraction:
+      enabled: [openai]
+`).Enabled, "on by default")
+
+	require.False(t, parse(t, `
+version: '2.0'
+instrumentation:
+  http:
+    payload_extraction:
+      enabled: [openai]
+      genai_shape_detection:
+        enabled: false
+`).Enabled)
+
+	cfg := defaultRuntimeConfig()
+	cfg.EBPF.PayloadExtraction.HTTP.GenAI.ShapeDetection.Enabled = false
+	_, ext := RuntimeToV2(&cfg)
+	got, err := V2ToRuntime(ext)
+	require.NoError(t, err)
+	require.False(t, got.EBPF.PayloadExtraction.HTTP.GenAI.ShapeDetection.Enabled)
+}

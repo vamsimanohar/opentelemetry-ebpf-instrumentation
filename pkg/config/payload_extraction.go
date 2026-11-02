@@ -111,6 +111,8 @@ type GenAIConfig struct {
 	OpenAICompatible OpenAICompatibleConfig `yaml:"openai_compatible"`
 	// Inferred execute_tool spans from LLM tool calls and their results. Config v2 only.
 	ToolCalls GenAIToolCallsConfig `yaml:"-" json:"-"`
+	// Detection of OpenAI- and Anthropic-format calls by endpoint and payload shape. Config v2 only.
+	ShapeDetection GenAIShapeDetectionConfig `yaml:"-" json:"-"`
 }
 
 // ProvidersEnabled reports whether any extractor of an LLM provider whose
@@ -182,6 +184,15 @@ type OllamaConfig struct {
 type CohereConfig struct {
 	// Enable Cohere native chat API payload extraction and parsing
 	Enabled bool `yaml:"-" json:"-"`
+}
+
+// GenAIShapeDetectionConfig classifies LLM API calls that no vendor response
+// header or provider hostname identifies (self-hosted servers such as vLLM or
+// Ollama, LiteLLM proxies, internal gateways) from the endpoint they address and
+// the shape of the request and response bodies. It applies to the formats whose
+// extractor is enabled: OpenAI (`openai` or `openai_compatible`) and Anthropic.
+type GenAIShapeDetectionConfig struct {
+	Enabled bool `yaml:"enabled" env:"OTEL_EBPF_HTTP_GENAI_SHAPE_DETECTION_ENABLED" validate:"boolean"`
 }
 
 type OpenAICompatibleConfig struct {
