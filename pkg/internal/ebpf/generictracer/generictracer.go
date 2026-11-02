@@ -609,6 +609,9 @@ func (p *Tracer) USDTProbes() map[string][]*ebpfcommon.USDTProbeDesc {
 }
 
 func (p *Tracer) SocketFilters() []*ebpf.Program {
+	if p.cfg.EBPF.DisableSocketFilter {
+		return nil
+	}
 	return []*ebpf.Program{p.bpfObjects.ObiSocketHttpFilter}
 }
 

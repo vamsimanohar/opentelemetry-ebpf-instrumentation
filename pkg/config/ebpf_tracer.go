@@ -190,6 +190,15 @@ type EBPFTracer struct {
 
 	// Disables uprobe_multi support for testing. This option is intentionally environment-only.
 	DisableUprobeMulti bool `yaml:"-" json:"-" env:"OTEL_EBPF_DEBUG_DISABLE_UPROBE_MULTI"`
+
+	// Leaves out the generic tracer's packet socket filter. Every packet on the
+	// host passes through it, which costs each connection and request of every
+	// process, instrumented or not. Without it OBI loses the payload of the sends
+	// and receives the socket probes cannot read (sendfile, splice), the trace
+	// context of requests relayed to another network interface, and the DNS
+	// messages of TCP connections. Set in code by embedders whose signals do not
+	// need those, and environment-only until it has a place in the v2 schema.
+	DisableSocketFilter bool `yaml:"-" json:"-" env:"OTEL_EBPF_BPF_DISABLE_SOCKET_FILTER"`
 }
 
 var nvidiaSMIExistsFunc = nvidiaSMIExists

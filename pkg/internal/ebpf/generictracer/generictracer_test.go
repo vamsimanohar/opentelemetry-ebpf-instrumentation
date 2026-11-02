@@ -480,3 +480,13 @@ func (f fakeServiceFilter) CurrentPIDs(ebpfcommon.PIDType) map[uint32]map[app.PI
 }
 
 func (f fakeServiceFilter) ProcPIDs(ebpfcommon.PIDType) []app.PID { return f.procPIDs }
+
+// The packet socket filter sees every packet on the host, so a configuration
+// that does not need it leaves it out.
+func TestSocketFilterIsOptional(t *testing.T) {
+	cfg := obi.DefaultConfig
+	assert.Len(t, (&Tracer{cfg: &cfg}).SocketFilters(), 1)
+
+	cfg.EBPF.DisableSocketFilter = true
+	assert.Empty(t, (&Tracer{cfg: &cfg}).SocketFilters())
+}
