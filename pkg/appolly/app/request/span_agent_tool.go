@@ -349,17 +349,7 @@ type responsesItem struct {
 // keyed by call_id. A stateful continuation (previous_response_id) carries only
 // those items, so all of them are trailing.
 func responsesToolResults(raw json.RawMessage) []ToolResult {
-	trailing := trailingTurn(raw, func(elem []byte) bool {
-		var it struct {
-			Type string `json:"type"`
-			Role string `json:"role"`
-		}
-		if json.Unmarshal(elem, &it) != nil {
-			return false
-		}
-		_, isCall := responsesItemCallTypes[it.Type]
-		return isCall || it.Type == "reasoning" || (it.Type == "message" && it.Role == "assistant")
-	})
+	trailing := trailingTurn(raw, isResponsesModelItem)
 
 	var results []ToolResult
 	for _, elem := range trailing {
@@ -383,6 +373,20 @@ func responsesToolResults(raw json.RawMessage) []ToolResult {
 	}
 
 	return results
+}
+
+// isResponsesModelItem tells whether a Responses API input item is part of a
+// model turn: a call, a reasoning item or an assistant message.
+func isResponsesModelItem(elem []byte) bool {
+	var it struct {
+		Type string `json:"type"`
+		Role string `json:"role"`
+	}
+	if json.Unmarshal(elem, &it) != nil {
+		return false
+	}
+	_, isCall := responsesItemCallTypes[it.Type]
+	return isCall || it.Type == "reasoning" || (it.Type == "message" && it.Role == "assistant")
 }
 
 // messagesToolResults reads Anthropic Messages `tool_result` blocks, which
@@ -497,6 +501,116 @@ func emptyJSONContainer(v string) bool {
 	return strings.TrimSpace(v[1:len(v)-1]) == ""
 }
 
+// TrailingTurnKind tells what the request sent after the model's last turn,
+// given the tool results of that turn: tool results, a user turn, or
+// anything else, such as a prefill of the model's answer.
+func (g *GenAI) TrailingTurnKind(results []ToolResult) string {
+	if len(results) > 0 {
+		return TrailingTurnToolResults
+	}
+	if g.endsWithUserTurn() {
+		return TrailingTurnUser
+	}
+
+	return TrailingTurnOther
+}
+
+func (g *GenAI) endsWithUserTurn() bool {
+	history, isModelTurn := g.historyTurns()
+	if len(history) > 0 {
+		return trailingHasRole(history, isModelTurn, "user")
+	}
+	if ai := g.openAIFamily(); ai != nil {
+		return ai.Request.Input != "" || ai.Request.Prompt != ""
+	}
+
+	return false
+}
+
+// ContinuesConversation tells whether the request carries an earlier turn of
+// the model: it continues a stored response, or its history holds a model
+// turn. A history the capture cut is looked at up to the cut.
+func (g *GenAI) ContinuesConversation() bool {
+	if g.PreviousResponseID() != "" {
+		return true
+	}
+	history, isModelTurn := g.historyTurns()
+	spans := arrayElementSpans(history)
+	for i := len(spans) - 1; i >= 0; i-- {
+		if isModelTurn(history[spans[i].start:spans[i].end]) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// historyTurns returns the conversation array of the request and the
+// predicate that tells the model's turns in it.
+func (g *GenAI) historyTurns() (json.RawMessage, func(elem []byte) bool) {
+	if ai := g.openAIFamily(); ai != nil {
+		if len(ai.Request.InputItems) > 0 {
+			return ai.Request.InputItems, isResponsesModelItem
+		}
+		return ai.Request.Messages, hasRole("assistant")
+	}
+
+	switch {
+	case g.Anthropic != nil:
+		return g.Anthropic.Input.Messages, hasRole("assistant")
+	case g.Gemini != nil:
+		return g.Gemini.Input.Contents, hasRole("model")
+	case g.Bedrock != nil:
+		return g.Bedrock.Input.Messages, hasRole("assistant")
+	}
+
+	return nil, nil
+}
+
+// OffersTools tells whether the request declared tools the model may call.
+func (g *GenAI) OffersTools() bool {
+	if ai := g.openAIFamily(); ai != nil {
+		return declared(ai.Request.Tools)
+	}
+
+	switch {
+	case g.Anthropic != nil:
+		return declared(g.Anthropic.Input.Tools)
+	case g.Gemini != nil:
+		return declared(g.Gemini.Input.Tools)
+	case g.Bedrock != nil:
+		return declared(g.Bedrock.Input.Tools) || declared(g.Bedrock.Input.ToolConfig)
+	}
+
+	return false
+}
+
+func declared(raw json.RawMessage) bool {
+	v := strings.TrimSpace(string(raw))
+	return v != "" && v != "null" && !emptyJSONContainer(v)
+}
+
+func hasRole(role string) func(elem []byte) bool {
+	return func(elem []byte) bool {
+		var m struct {
+			Role string `json:"role"`
+		}
+		return json.Unmarshal(elem, &m) == nil && m.Role == role
+	}
+}
+
+// trailingHasRole tells whether an element of the trailing turn has the role.
+func trailingHasRole(raw []byte, isModelTurn func(elem []byte) bool, role string) bool {
+	is := hasRole(role)
+	for _, elem := range trailingTurn(raw, isModelTurn) {
+		if is(elem) {
+			return true
+		}
+	}
+
+	return false
+}
+
 // trailingTurn returns the elements of a JSON array after the last one for
 // which isModelTurn holds, all of them when none does. Elements are only
 // split, not decoded, and the model turns are looked for from the end, so the
@@ -550,6 +664,49 @@ func jsonArrayElements(raw []byte) ([][]byte, bool) {
 	}
 
 	return nil, false
+}
+
+type elementSpan struct {
+	start, end int
+}
+
+// arrayElementSpans returns the bounds of the top-level elements of a JSON
+// array, up to the first element the capture cut. Elements are only split,
+// not decoded.
+func arrayElementSpans(raw []byte) []elementSpan {
+	i := skipJSONSpace(raw, 0)
+	if i >= len(raw) || raw[i] != '[' {
+		return nil
+	}
+
+	var spans []elementSpan
+	for i = skipJSONSpace(raw, i+1); i < len(raw) && raw[i] != ']'; {
+		end := jsonValueEnd(raw, i)
+		if end < 0 {
+			break
+		}
+		spans = append(spans, elementSpan{start: i, end: end})
+		i = skipJSONSpace(raw, end)
+		if i >= len(raw) || raw[i] != ',' {
+			break
+		}
+		i = skipJSONSpace(raw, i+1)
+	}
+
+	return spans
+}
+
+// ArrayElementEnds returns the offset after each top-level element of a JSON
+// array, up to the first element the capture cut: the bytes before each
+// offset are the array with its later elements left out.
+func ArrayElementEnds(raw []byte) []int {
+	spans := arrayElementSpans(raw)
+	ends := make([]int, len(spans))
+	for i := range spans {
+		ends[i] = spans[i].end
+	}
+
+	return ends
 }
 
 // jsonValueEnd returns the index after the JSON value that starts at i, or -1

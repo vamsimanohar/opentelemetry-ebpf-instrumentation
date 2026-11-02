@@ -83,6 +83,9 @@ const (
 	EventTypeGenAIToolWindow
 	// EventTypeProcessExec is a process observed while an inferred tool call was open.
 	EventTypeProcessExec
+	// EventTypeGenAIAgentRun is an agent run inferred from the LLM calls and
+	// tool calls of one conversation.
+	EventTypeGenAIAgentRun
 )
 
 const (
@@ -246,6 +249,8 @@ func (t EventType) String() string {
 		return "GenAIToolWindow"
 	case EventTypeProcessExec:
 		return "ProcessExec"
+	case EventTypeGenAIAgentRun:
+		return "GenAIAgentRun"
 	default:
 		return fmt.Sprintf("UNKNOWN (%d)", t)
 	}
@@ -934,6 +939,8 @@ type BedrockRequest struct {
 	// Tool use (Claude / Nova)
 	Tools         json.RawMessage `json:"tools,omitempty"`
 	StopSequences []string        `json:"stop_sequences,omitempty"`
+	// Tool use (Converse)
+	ToolConfig json.RawMessage `json:"toolConfig,omitempty"`
 }
 
 type TitanGenConfig struct {
@@ -1160,6 +1167,7 @@ const (
 	EmbeddingOperationName      = "embeddings"
 	ConversationOperationName   = "conversation"
 	ExecuteToolOperationName    = "execute_tool"
+	InvokeAgentOperationName    = "invoke_agent"
 	ChatKitSessionOperationName = "chatkit.session"
 	ChatKitThreadOperationName  = "chatkit.thread"
 	OtherOperationName          = "_OTHER"
@@ -1623,6 +1631,12 @@ type Span struct {
 	InferredTool *InferredTool `json:"-"`
 	// Process describes EventTypeProcessExec spans.
 	Process *ObservedProcess `json:"-"`
+	// Conversation ties a GenAI inference span to the other requests of its
+	// conversation. Set only when inferred tool calls are enabled.
+	Conversation *GenAIConversation `json:"-"`
+	// ExtraAttributes are exported with the span, whatever its type, after
+	// the attributes OBI derives from it.
+	ExtraAttributes []attribute.KeyValue `json:"-"`
 
 	// Anything but ResponseParsed means Status holds no observation. Whether the
 	// duration is a measurement is recorded separately, by ignoreDurations.
@@ -2410,6 +2424,8 @@ func (s *Span) TraceName() string {
 		return dbSpanName(s.Method, target, dbSystemNameForSpan(s))
 	case EventTypeGenAIToolExec, EventTypeGenAIToolWindow, EventTypeProcessExec:
 		return s.agentToolSpanName()
+	case EventTypeGenAIAgentRun:
+		return InvokeAgentOperationName
 	}
 	return ""
 }

@@ -478,7 +478,8 @@ func CodeToStatusCode(code string) ptrace.StatusCode {
 func acceptSpan(is instrumentations.InstrumentationSelection, span *request.Span) bool {
 	switch span.Type {
 	case request.EventTypeManualSpan, request.EventTypeFailedConnect,
-		request.EventTypeGenAIToolExec, request.EventTypeGenAIToolWindow, request.EventTypeProcessExec:
+		request.EventTypeGenAIToolExec, request.EventTypeGenAIToolWindow, request.EventTypeProcessExec,
+		request.EventTypeGenAIAgentRun:
 		return true
 	case request.EventTypeGPUCudaKernelLaunch,
 		request.EventTypeGPUCudaGraphLaunch,
@@ -1787,6 +1788,8 @@ func traceAttributesSelectorInternal(span *request.Span, optionalAttrs map[attr.
 		attrs = inferredToolAttributes(span, optionalAttrs)
 	case request.EventTypeProcessExec:
 		attrs = observedProcessAttributes(span, optionalAttrs)
+	case request.EventTypeGenAIAgentRun:
+		attrs = []attribute.KeyValue{semconv.GenAIOperationNameInvokeAgent}
 	case request.EventTypeFailedConnect:
 		attrs = []attribute.KeyValue{
 			request.ServerPort(span.HostPort),
@@ -1826,6 +1829,8 @@ func traceAttributesSelectorInternal(span *request.Span, optionalAttrs map[attr.
 	if _, ok := optionalAttrs[attr.ErrorType]; ok && !hasAttribute(attrs, semconv.ErrorTypeKey) {
 		attrs = appendIfSet(attrs, request.ErrorType, request.SpanErrorType(span))
 	}
+
+	attrs = append(attrs, span.ExtraAttributes...)
 
 	if _, ok := optionalAttrs[attr.SkipSpanMetrics]; ok {
 		attrs = append(attrs, spanMetricsSkip)

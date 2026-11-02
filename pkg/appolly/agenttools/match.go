@@ -40,7 +40,9 @@ type tracker struct {
 	exitGrace time.Duration
 	probation int64
 	windowIDs uint64
-	now       func() int64
+	// conversations created so far, which their keys derive from
+	conversationKeys uint64
+	now              func() int64
 }
 
 func newTracker(cfg *config.GenAIToolCallsConfig, maxTransactionTime time.Duration, roots *agentact.RootRegistry) *tracker {
@@ -104,6 +106,8 @@ func (t *tracker) onInference(span *request.Span, now int64) []request.Span {
 	}
 	alog().Debug("inference", "pid", span.Pid.HostPID, "start", span.Start, "end", span.End,
 		"results", len(req.results), "calls", len(span.GenAI.ToolCalls()), "pending", len(p.pending))
+
+	t.annotateConversation(p, span, &req, now)
 
 	unparsed := len(span.GenAI.UnparsedRequest) > 0
 	out := t.applyRequest(p, &req, p.pending, unparsed)

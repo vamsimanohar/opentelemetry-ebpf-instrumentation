@@ -295,6 +295,8 @@ type procState struct {
 	// threads that served several conversations at once: being on one of
 	// them does not tie an event to a call
 	multiplexed map[uint32]struct{}
+	// the conversations of the process's LLM calls, created at the first one
+	conversations *conversations
 
 	// server endpoints of the process's GenAI spans
 	endpoints map[netip.AddrPort]struct{}
