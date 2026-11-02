@@ -966,25 +966,12 @@ int BPF_KPROBE_GUARDED(obi_kprobe_sock_recvmsg,
     return 0;
 }
 
-// This is a duplicated setup functionality from tcp_recvmsg because when
-// the sock_msg filter is installed, the tcp_recvmsg doesn't trigger for
-// peek into socket channels. We need to track the peek so we can support
-// the context propagation. When tcp_recvmsg happened, the args would be
-// cleaned up by that probe and this kprobe won't do anything.
-SEC("kretprobe/sock_recvmsg")
-int BPF_KRETPROBE_GUARDED(obi_kretprobe_sock_recvmsg, int copied_len) {
-    (void)ctx;
-
-    const u64 id = bpf_get_current_pid_tgid();
-
-    if (!valid_pid(id)) {
-        return 0;
-    }
-
+// Completes a receive that tcp_recvmsg did not handle: a UDP datagram, DNS
+// answers among them, or a peek into a socket with a sock_msg filter.
+static __always_inline int return_socket_recvmsg(const u64 id, int copied_len) {
     recv_args_t *args = bpf_map_lookup_elem(&active_recv_args, &id);
 
-    bpf_dbg_printk(
-        "=== kretprobe/sock_recvmsg id=%d, args=%llx, copied_len=%d ===", id, args, copied_len);
+    bpf_dbg_printk("id=%d, args=%llx, copied_len=%d", id, args, copied_len);
 
     if (!args) {
         return 0;
@@ -1056,6 +1043,61 @@ done:
     bpf_map_delete_elem(&active_recv_args, &id);
 
     return 0;
+}
+
+// This is a duplicated setup functionality from tcp_recvmsg because when
+// the sock_msg filter is installed, the tcp_recvmsg doesn't trigger for
+// peek into socket channels. We need to track the peek so we can support
+// the context propagation. When tcp_recvmsg happened, the args would be
+// cleaned up by that probe and this kprobe won't do anything.
+SEC("kretprobe/sock_recvmsg")
+int BPF_KRETPROBE_GUARDED(obi_kretprobe_sock_recvmsg, int copied_len) {
+    (void)ctx;
+
+    const u64 id = bpf_get_current_pid_tgid();
+
+    if (!valid_pid(id)) {
+        return 0;
+    }
+
+    bpf_dbg_printk("=== kretprobe/sock_recvmsg id=%d ===", id);
+
+    return return_socket_recvmsg(id, copied_len);
+}
+
+// Without context propagation, sock_recvmsg, which every socket read on the
+// host goes through, is left alone: the UDP receives it was needed for, DNS
+// answers among them, are tracked here instead, for IPv4 and IPv6.
+SEC("kprobe/udp_recvmsg")
+int BPF_KPROBE_GUARDED(obi_kprobe_udp_recvmsg, struct sock *sk, struct msghdr *msg) {
+    (void)ctx;
+
+    const u64 id = bpf_get_current_pid_tgid();
+
+    if (!valid_pid(id)) {
+        return 0;
+    }
+
+    bpf_dbg_printk("=== kprobe/udp_recvmsg id=%d, sock=%llx ===", id, sk);
+
+    setup_recvmsg(id, sk, msg);
+
+    return 0;
+}
+
+SEC("kretprobe/udp_recvmsg")
+int BPF_KRETPROBE_GUARDED(obi_kretprobe_udp_recvmsg, int copied_len) {
+    (void)ctx;
+
+    const u64 id = bpf_get_current_pid_tgid();
+
+    if (!valid_pid(id)) {
+        return 0;
+    }
+
+    bpf_dbg_printk("=== kretprobe/udp_recvmsg id=%d ===", id);
+
+    return return_socket_recvmsg(id, copied_len);
 }
 
 static __always_inline void mark_port_unreadable(u16 port) {
@@ -1222,7 +1264,14 @@ int BPF_KRETPROBE_GUARDED(obi_kretprobe_tcp_recvmsg, int copied_len) {
 
     bpf_dbg_printk("=== kretprobe_tcp_recvmsg id=%d, copied_len=%d ===", id, copied_len);
 
-    return return_recvmsg(ctx, 0, id, copied_len);
+    return_recvmsg(ctx, 0, id, copied_len);
+    // The receive is over. A receive without data leaves its arguments for
+    // tcp_cleanup_rbuf, which runs inside tcp_recvmsg but also outside it
+    // (splice); without sock_recvmsg's return to drop them, they would be read
+    // there with this receive's buffer.
+    bpf_map_delete_elem(&active_recv_args, &id);
+
+    return 0;
 }
 
 static __always_inline unsigned char *new_empty_capture_buffer(connection_info_t *conn,

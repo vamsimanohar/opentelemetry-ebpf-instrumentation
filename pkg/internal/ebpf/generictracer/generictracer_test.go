@@ -23,6 +23,7 @@ import (
 	"go.opentelemetry.io/obi/pkg/appolly/app/svc"
 	"go.opentelemetry.io/obi/pkg/appolly/discover/exec"
 	"go.opentelemetry.io/obi/pkg/appolly/services"
+	"go.opentelemetry.io/obi/pkg/config"
 	ebpfcommon "go.opentelemetry.io/obi/pkg/ebpf/common"
 	"go.opentelemetry.io/obi/pkg/ebpf/ringbuf"
 	"go.opentelemetry.io/obi/pkg/export"
@@ -511,4 +512,24 @@ func TestInjectorProbesFollowTheInjectors(t *testing.T) {
 
 	tracer.traceCtxMapEnabled = true
 	assert.Contains(t, tracer.Tracepoints(), "sched/sched_process_exit")
+}
+
+// sock_recvmsg runs for every socket read on the host. It is only probed for
+// context propagation, whose sock_msg filter hides peeks from tcp_recvmsg;
+// otherwise UDP receives (DNS answers) are probed where they happen.
+func TestSocketReceiveProbesFollowContextPropagation(t *testing.T) {
+	cfg := obi.DefaultConfig
+	tracer := &Tracer{cfg: &cfg}
+
+	probes := tracer.KProbes()
+	assert.NotContains(t, probes, "sock_recvmsg")
+	assert.Contains(t, probes, "udp_recvmsg")
+	assert.Contains(t, probes, "udpv6_recvmsg")
+	assert.Contains(t, probes, "tcp_recvmsg")
+
+	cfg.EBPF.ContextPropagation = config.ContextPropagationAll
+	probes = tracer.KProbes()
+	assert.Contains(t, probes, "sock_recvmsg")
+	assert.NotContains(t, probes, "udp_recvmsg")
+	assert.NotContains(t, probes, "udpv6_recvmsg")
 }

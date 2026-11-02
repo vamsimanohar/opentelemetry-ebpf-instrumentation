@@ -302,11 +302,6 @@ func (p *Tracer) KProbes() map[string]ebpfcommon.ProbeDesc {
 			Start:    p.bpfObjects.ObiKprobeSysConnect,
 			End:      p.bpfObjects.ObiKretprobeSysConnect,
 		},
-		"sock_recvmsg": {
-			Required: true,
-			Start:    p.bpfObjects.ObiKprobeSockRecvmsg,
-			End:      p.bpfObjects.ObiKretprobeSockRecvmsg,
-		},
 		"tcp_connect": {
 			Required: true,
 			Start:    p.bpfObjects.ObiKprobeTcpConnect,
@@ -383,6 +378,12 @@ func (p *Tracer) KProbes() map[string]ebpfcommon.ProbeDesc {
 	}
 
 	if p.cfg.EBPF.ContextPropagation.IsEnabled() {
+		// with a sock_msg filter, peeks skip tcp_recvmsg and are only seen here
+		kp["sock_recvmsg"] = ebpfcommon.ProbeDesc{
+			Required: true,
+			Start:    p.bpfObjects.ObiKprobeSockRecvmsg,
+			End:      p.bpfObjects.ObiKretprobeSockRecvmsg,
+		}
 		// tcp_rate_check_app_limited and tcp_sendmsg_fastopen are backup
 		// for tcp_sendmsg_locked which doesn't fire on certain kernels
 		// if sk_msg is attached.
@@ -393,6 +394,16 @@ func (p *Tracer) KProbes() map[string]ebpfcommon.ProbeDesc {
 		kp["tcp_sendmsg_fastopen"] = ebpfcommon.ProbeDesc{
 			Required: false,
 			Start:    p.bpfObjects.ObiKprobeTcpRateCheckAppLimited,
+		}
+	} else {
+		// sock_recvmsg runs for every socket read on the host; the UDP
+		// receives it covers for tcp_recvmsg (DNS answers) are read here
+		for _, udpRecv := range []string{"udp_recvmsg", "udpv6_recvmsg"} {
+			kp[udpRecv] = ebpfcommon.ProbeDesc{
+				Required: false,
+				Start:    p.bpfObjects.ObiKprobeUdpRecvmsg,
+				End:      p.bpfObjects.ObiKretprobeUdpRecvmsg,
+			}
 		}
 	}
 	p.agentActivityKProbes(kp)
