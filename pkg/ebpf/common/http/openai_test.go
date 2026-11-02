@@ -163,7 +163,7 @@ func TestOpenAISpan_Responses(t *testing.T) {
 
 	ai := span.GenAI.OpenAI
 	assert.Equal(t, "resp_09687a288637e2be006998ad7af05481a2bb0938f77da5a9db", ai.ID)
-	assert.Equal(t, "response", ai.OperationName)
+	assert.Equal(t, request.ChatOperationName, ai.OperationName)
 	assert.Equal(t, "gpt-5-mini-2025-08-07", ai.ResponseModel)
 	assert.Equal(t, 36, reportedValue(ai.Usage.InputTokenCount()))
 	assert.Equal(t, 691, reportedValue(ai.Usage.OutputTokenCount()))
@@ -221,7 +221,7 @@ func TestOpenAISpan_ErrorResponse(t *testing.T) {
 	// The error body carries no `object` field, so the operation name must be
 	// derived from the request path: gen_ai.operation.name is required on the
 	// gen_ai client metrics, so failed calls must carry it too.
-	assert.Equal(t, request.ResponseOperationName, ai.OperationName)
+	assert.Equal(t, request.ChatOperationName, ai.OperationName)
 	assert.Equal(t, "responses", ai.APIType)
 }
 
@@ -519,7 +519,7 @@ func TestOpenAIOperation(t *testing.T) {
 		{
 			name:          "responses",
 			path:          "/v1/responses",
-			wantOperation: request.ResponseOperationName,
+			wantOperation: request.ChatOperationName,
 			wantAPIType:   openAIAPITypeResponses,
 		},
 		{

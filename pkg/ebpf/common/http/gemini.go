@@ -227,9 +227,20 @@ func extractGeminiModelFromPath(path string) string {
 	return model
 }
 
+// geminiMethodOperations maps the Gemini API methods that semconv names onto
+// its operations. Streaming is a property of the call (gen_ai.request.stream),
+// not an operation of its own.
+var geminiMethodOperations = map[string]string{
+	"generateContent":       request.DefaultGeminiOperation,
+	"streamGenerateContent": request.DefaultGeminiOperation,
+	"embedContent":          request.EmbeddingOperationName,
+	"batchEmbedContents":    request.EmbeddingOperationName,
+}
+
 // extractGeminiOperation extracts the operation name from the URL path.
 // The operation appears after the colon in the model segment, e.g.
-// /models/gemini-2.0-flash:generateContent → generate_content.
+// /models/gemini-2.0-flash:generateContent → generate_content. A method
+// semconv has no operation for is reported in snake case (count_tokens).
 func extractGeminiOperation(req *http.Request) string {
 	if req == nil || req.URL == nil {
 		return request.DefaultGeminiOperation
@@ -244,7 +255,11 @@ func extractGeminiOperation(req *http.Request) string {
 	if colonIdx < 0 || colonIdx+1 >= len(after) {
 		return request.DefaultGeminiOperation
 	}
-	return camelToSnake(after[colonIdx+1:])
+	method := after[colonIdx+1:]
+	if operation, ok := geminiMethodOperations[method]; ok {
+		return operation
+	}
+	return camelToSnake(method)
 }
 
 // camelToSnake converts a camelCase string to snake_case.

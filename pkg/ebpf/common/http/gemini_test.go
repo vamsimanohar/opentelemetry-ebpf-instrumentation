@@ -212,7 +212,7 @@ func TestGeminiSpan_GoGenAI_EmbedContent(t *testing.T) {
 
 	require.True(t, ok)
 	assert.Equal(t, "text-embedding-004", span.GenAI.Gemini.Model)
-	assert.Equal(t, "embed_content", span.GenAI.Gemini.Operation)
+	assert.Equal(t, request.EmbeddingOperationName, span.GenAI.Gemini.Operation)
 }
 
 func TestExtractGeminiModel(t *testing.T) {
@@ -270,12 +270,22 @@ func TestExtractGeminiOperation(t *testing.T) {
 		{
 			name: "streamGenerateContent",
 			url:  "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:streamGenerateContent",
-			want: "stream_generate_content",
+			want: "generate_content",
+		},
+		{
+			name: "streamGenerateContent with alt=sse",
+			url:  "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:streamGenerateContent?alt=sse",
+			want: "generate_content",
 		},
 		{
 			name: "embedContent",
 			url:  "https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent",
-			want: "embed_content",
+			want: "embeddings",
+		},
+		{
+			name: "batchEmbedContents",
+			url:  "https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:batchEmbedContents",
+			want: "embeddings",
 		},
 		{
 			name: "countTokens",
@@ -447,7 +457,7 @@ func TestGeminiSpan_StreamResponse(t *testing.T) {
 	assert.Equal(t, request.HTTPSubtypeGemini, span.SubType)
 	assert.True(t, ai.IsStream)
 	assert.Equal(t, "gemini-2.0-flash", ai.Model)
-	assert.Equal(t, "stream_generate_content", ai.Operation)
+	assert.Equal(t, request.DefaultGeminiOperation, ai.Operation, "streaming is gen_ai.request.stream, not an operation")
 	assert.Equal(t, "gemini-2.0-flash", ai.Output.ModelVersion)
 	assert.Equal(t, "resp_stream", ai.Output.ResponseID)
 	assert.Equal(t, 12, tokenValue(ai.Output.UsageMetadata.PromptTokenCount))

@@ -177,14 +177,17 @@ attributes:
     type: string
     brief: The name of the operation being performed.
     note: >
-      OBI reports the provider's own operation vocabulary (e.g.
+      OBI reports the semconv operation where semconv defines one (the
+      OpenAI Responses API and Bedrock Converse report 'chat', Gemini
+      streaming reports 'generate_content' with `gen_ai.request.stream`), and
+      the provider's own operation vocabulary otherwise (e.g.
       'invoke_model' for Bedrock InvokeModel, 'generation' for Qwen/DashScope,
-      'conversation'/'response' for the OpenAI APIs, 'rerank'). A GenAI
+      'conversation' for the OpenAI Conversations API, 'rerank'). A GenAI
       call OBI recognised but whose operation it could not classify
       reports `_OTHER`, so the attribute is always present on a GenAI
       span. MCP reports 'execute_tool' for a tool call and omits the
       attribute for every other method.
-    examples: ['chat', 'embeddings', 'response', 'conversation', 'invoke_model', 'rerank', 'execute_tool', '_OTHER']
+    examples: ['chat', 'embeddings', 'generate_content', 'conversation', 'invoke_model', 'rerank', 'execute_tool', '_OTHER']
 
   - key: gen_ai.metadata
     annotations:
@@ -249,7 +252,7 @@ attribute_groups:
   # - `gen_ai.operation.name`: re-typed as a plain string. Upstream's note
   #   explicitly recommends system-specific operation names, and OBI emits the
   #   provider's own vocabulary ('invoke_model' for Bedrock InvokeModel,
-  #   'conversation'/'response' for the OpenAI APIs, 'rerank', ...),
+  #   'conversation' for the OpenAI Conversations API, 'rerank', ...),
   #   which upstream's enum has no members for. MCP is not part of this: it
   #   emits only the upstream-defined 'execute_tool', and nothing at all for
   #   methods that are not tool calls.

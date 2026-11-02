@@ -145,6 +145,12 @@ section empty once drained.
   semconv value for a chat API, instead of `invoke_model`, and their span name changes from
   `invoke_model {model}` to `chat {model}`; `gen_ai.client.*` series split accordingly.
   ConverseStream spans also carry `gen_ai.request.stream`. InvokeModel spans are unchanged.
+- OpenAI Responses API spans report `gen_ai.operation.name` `chat` instead of `response`
+  (span name `chat {model}`); `openai.api.type` `responses` still tells them apart from Chat
+  Completions. Gemini `streamGenerateContent` spans report `generate_content` instead of
+  `stream_generate_content`, the stream being `gen_ai.request.stream`, and Gemini
+  `embedContent`/`batchEmbedContents` spans report `embeddings` instead of `embed_content`/
+  `batch_embed_contents`. Span names and `gen_ai.client.*` series change with them.
 
 ## Hosting notes
 

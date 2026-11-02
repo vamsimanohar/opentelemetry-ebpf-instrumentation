@@ -179,7 +179,8 @@ var openAIEndpoints = []struct {
 	{"/chat/completions", request.ChatOperationName, openAIAPITypeChatCompletions},
 	{"/completions", request.CompletionOperationName, openAIAPITypeTextCompletions},
 	{"/embeddings", request.EmbeddingOperationName, openAIAPITypeEmbeddings},
-	{"/responses", request.ResponseOperationName, openAIAPITypeResponses},
+	// semconv names the Responses API `chat`; openai.api.type keeps it apart
+	{"/responses", request.ChatOperationName, openAIAPITypeResponses},
 	{"/conversations", request.ConversationOperationName, ""},
 	{"/chatkit/sessions", request.ChatKitSessionOperationName, ""},
 	{"/chatkit/threads", request.ChatKitThreadOperationName, ""},

@@ -497,7 +497,7 @@ func TestOpenAICompatibleSpan_ResponsesReportsOperation(t *testing.T) {
 
 	require.True(t, ok)
 	require.NotNil(t, span.GenAI.OpenAICompatible)
-	assert.Equal(t, request.ResponseOperationName, span.GenAI.OpenAICompatible.OperationName)
+	assert.Equal(t, request.ChatOperationName, span.GenAI.OpenAICompatible.OperationName)
 	assert.Equal(t, "responses", span.GenAI.OpenAICompatible.APIType)
 }
 
