@@ -65,6 +65,8 @@ type Tracer struct {
 	eventCtx       *ebpfcommon.EBPFEventContext
 	jvmUSDTManager ebpfcommon.USDTSpecManager
 	pythonRuntime  *pythonRuntimeController
+	// the trampoline twins that replace their kprobe on this kernel, by program
+	trampolined map[string]bool
 }
 
 func tlog() *slog.Logger {
@@ -180,6 +182,7 @@ func (p *Tracer) LoadSpecs() ([]*ebpfcommon.SpecBundle, error) {
 	}
 
 	ebpfcommon.FixupSpec(spec, p.cfg.EBPF.OverrideBPFLoopEnabled)
+	p.prepareTrampolines(spec)
 	if !ebpfcommon.SupportsJavaHTTP1ReservationCleanup() {
 		ebpfcommon.DisableJavaHTTP1Atomics(spec)
 	}
@@ -407,6 +410,7 @@ func (p *Tracer) KProbes() map[string]ebpfcommon.ProbeDesc {
 		}
 	}
 	p.agentActivityKProbes(kp)
+	p.withoutTrampolined(kp)
 
 	return kp
 }
@@ -698,7 +702,9 @@ func (p *Tracer) runItersForPID(pid app.PID) {
 	p.seenNetns.Add(inode, struct{}{})
 }
 
-func (p *Tracer) Tracing() []*ebpfcommon.Tracing { return p.agentActivityTracing() }
+func (p *Tracer) Tracing() []*ebpfcommon.Tracing {
+	return append(p.agentActivityTracing(), p.trampolineTracing()...)
+}
 
 func (p *Tracer) RecordInstrumentedLib(id uint64, closers []io.Closer) {
 	p.libsMux.Lock()

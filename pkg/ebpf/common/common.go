@@ -275,6 +275,15 @@ type Tracing struct {
 	// Required, if true, will cancel the execution of the eBPF Tracer when
 	// the program cannot be attached
 	Required bool
+	// Fallback, when set, is attached instead if the program cannot be
+	Fallback *KprobeFallback
+}
+
+// KprobeFallback is the kprobe, or kretprobe, that a tracing program replaces
+type KprobeFallback struct {
+	Symbol  string
+	Program *ebpf.Program
+	Return  bool
 }
 
 type MisclassifiedEvent struct {

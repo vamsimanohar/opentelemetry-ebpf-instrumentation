@@ -1204,6 +1204,16 @@ func (i *instrumenter) tracing(p Tracer) error {
 			Program:    tracing.Program,
 			AttachType: tracing.AttachAs,
 		})
+		if err != nil && tracing.Fallback != nil {
+			fallback, fallbackErr := attachKprobeFallback(tracing.Fallback)
+			if fallbackErr == nil {
+				slog.Debug("attached the kprobe a tracing program replaces",
+					"program", tracing.Program.String(), "symbol", tracing.Fallback.Symbol, "error", err)
+				p.AddCloser(fallback)
+				continue
+			}
+			err = errors.Join(err, fallbackErr)
+		}
 		if err != nil {
 			if i.metrics != nil {
 				i.metrics.InstrumentationError(i.processName, imetrics.InstrumentationErrorAttachingTracing)
@@ -1220,6 +1230,13 @@ func (i *instrumenter) tracing(p Tracer) error {
 	}
 
 	return nil
+}
+
+func attachKprobeFallback(fallback *ebpfcommon.KprobeFallback) (io.Closer, error) {
+	if fallback.Return {
+		return attachKretprobe(fallback.Symbol, fallback.Program)
+	}
+	return attachKprobe(fallback.Symbol, fallback.Program)
 }
 
 // the process module helpers below are called with attachMu held

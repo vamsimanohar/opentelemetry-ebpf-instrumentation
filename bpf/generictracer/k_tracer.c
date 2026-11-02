@@ -63,14 +63,14 @@
 
 SCRATCH_MEM_TYPED(backup_buffer, backup_buffer_t)
 
-// Used by accept to grab the sock details
-SEC("kprobe/security_socket_accept")
-int BPF_KPROBE_GUARDED(obi_kprobe_security_socket_accept,
-                       struct socket *sock,
-                       struct socket *newsock) {
-    (void)ctx;
-    (void)sock;
+// The probes below run for every process on the host. Each is a kprobe and,
+// where the kernel has BPF trampolines, a cheaper fentry/fexit twin that
+// shares its body: user space attaches one of the two. A function that keeps a
+// kprobe has no twin: a trampoline and a kprobe on one function take ftrace's
+// shared path, which costs more than the kprobe alone.
 
+// Used by accept to grab the sock details
+static __always_inline int security_socket_accept_entry(const struct socket *newsock) {
     const u64 id = bpf_get_current_pid_tgid();
 
     if (!valid_pid(id)) {
@@ -93,16 +93,32 @@ int BPF_KPROBE_GUARDED(obi_kprobe_security_socket_accept,
     return 0;
 }
 
+SEC("kprobe/security_socket_accept")
+int BPF_KPROBE_GUARDED(obi_kprobe_security_socket_accept,
+                       struct socket *sock,
+                       struct socket *newsock) {
+    (void)ctx;
+    (void)sock;
+
+    return security_socket_accept_entry(newsock);
+}
+
+SEC("fentry/security_socket_accept")
+int BPF_PROG_GUARDED(obi_fentry_security_socket_accept,
+                     struct socket *sock,
+                     struct socket *newsock) {
+    (void)sock;
+
+    return security_socket_accept_entry(newsock);
+}
+
 // We tap into both sys_accept and sys_accept4.
 // We don't care about the accept entry arguments, since we get only peer information
 // we don't have the full picture for the socket.
 //
 // Note: A current limitation is that likely we won't capture the first accept request. The
 // process may have already reached accept, before the instrumenter has launched.
-SEC("kretprobe/sys_accept4")
-int BPF_KRETPROBE_GUARDED(obi_kretprobe_sys_accept4, s32 fd) {
-    (void)ctx;
-
+static __always_inline int sys_accept_return(const s32 fd) {
     const u64 id = bpf_get_current_pid_tgid();
     if (!valid_pid(id)) {
         return 0;
@@ -169,8 +185,30 @@ cleanup:
     return 0;
 }
 
-SEC("kprobe/sys_connect")
-int BPF_KPROBE_GUARDED(obi_kprobe_sys_connect) {
+SEC("kretprobe/sys_accept4")
+int BPF_KRETPROBE_GUARDED(obi_kretprobe_sys_accept4, s32 fd) {
+    (void)ctx;
+
+    return sys_accept_return(fd);
+}
+
+// one program per syscall: a trampoline program has a single attach target
+SEC("fexit/sys_accept4")
+int BPF_PROG_GUARDED(obi_fexit_sys_accept4, const struct pt_regs *regs, long ret) {
+    (void)regs;
+
+    return sys_accept_return((s32)ret);
+}
+
+SEC("fexit/sys_accept")
+int BPF_PROG_GUARDED(obi_fexit_sys_accept, const struct pt_regs *regs, long ret) {
+    (void)regs;
+
+    return sys_accept_return((s32)ret);
+}
+
+// regs: the syscall's user registers, the only argument of its wrapper
+static __always_inline int sys_connect_entry(const struct pt_regs *regs) {
     const u64 id = bpf_get_current_pid_tgid();
 
     if (!valid_pid(id)) {
@@ -179,8 +217,7 @@ int BPF_KPROBE_GUARDED(obi_kprobe_sys_connect) {
 
     // unwrap fd because of sys call
     int fd;
-    struct pt_regs *__ctx = (struct pt_regs *)PT_REGS_PARM1(ctx);
-    bpf_probe_read(&fd, sizeof(int), (void *)&PT_REGS_PARM1(__ctx));
+    bpf_probe_read(&fd, sizeof(int), (void *)&PT_REGS_PARM1(regs));
 
     bpf_dbg_printk("=== kprobe/sys_connect id=%d, fd=%d ===", id, fd);
 
@@ -191,6 +228,16 @@ int BPF_KPROBE_GUARDED(obi_kprobe_sys_connect) {
     bpf_map_update_elem(&active_connect_args, &id, &args, BPF_ANY);
 
     return 0;
+}
+
+SEC("kprobe/sys_connect")
+int BPF_KPROBE_GUARDED(obi_kprobe_sys_connect) {
+    return sys_connect_entry((const struct pt_regs *)PT_REGS_PARM1(ctx));
+}
+
+SEC("fentry/sys_connect")
+int BPF_PROG_GUARDED(obi_fentry_sys_connect, const struct pt_regs *regs) {
+    return sys_connect_entry(regs);
 }
 
 static __always_inline void store_sock_pid(struct sock *sk) {
@@ -210,10 +257,7 @@ static __always_inline void store_sock_pid(struct sock *sk) {
 }
 
 // Used by connect so that we can grab the sock details
-SEC("kprobe/tcp_connect")
-int BPF_KPROBE_GUARDED(obi_kprobe_tcp_connect, struct sock *sk) {
-    (void)ctx;
-
+static __always_inline int tcp_connect_entry(struct sock *sk) {
     agent_activity_on_connect(sk);
 
     const u64 id = bpf_get_current_pid_tgid();
@@ -241,6 +285,18 @@ int BPF_KPROBE_GUARDED(obi_kprobe_tcp_connect, struct sock *sk) {
     }
 
     return 0;
+}
+
+SEC("kprobe/tcp_connect")
+int BPF_KPROBE_GUARDED(obi_kprobe_tcp_connect, struct sock *sk) {
+    (void)ctx;
+
+    return tcp_connect_entry(sk);
+}
+
+SEC("fentry/tcp_connect")
+int BPF_PROG_GUARDED(obi_fentry_tcp_connect, struct sock *sk) {
+    return tcp_connect_entry(sk);
 }
 
 SEC("kprobe/udp_sendmsg")
@@ -374,10 +430,7 @@ static __always_inline void setup_cp_support_conn_info(pid_connection_info_t *p_
 
 // We tap into sys_connect so we can track properly the processes doing
 // HTTP client calls
-SEC("kretprobe/sys_connect")
-int BPF_KRETPROBE_GUARDED(obi_kretprobe_sys_connect, int res) {
-    (void)ctx;
-
+static __always_inline int sys_connect_return(const int res) {
     const u64 id = bpf_get_current_pid_tgid();
 
     if (!valid_pid(id)) {
@@ -445,6 +498,20 @@ int BPF_KRETPROBE_GUARDED(obi_kretprobe_sys_connect, int res) {
 cleanup:
     bpf_map_delete_elem(&active_connect_args, &id);
     return 0;
+}
+
+SEC("kretprobe/sys_connect")
+int BPF_KRETPROBE_GUARDED(obi_kretprobe_sys_connect, int res) {
+    (void)ctx;
+
+    return sys_connect_return(res);
+}
+
+SEC("fexit/sys_connect")
+int BPF_PROG_GUARDED(obi_fexit_sys_connect, const struct pt_regs *regs, long ret) {
+    (void)regs;
+
+    return sys_connect_return((int)ret);
 }
 
 static __always_inline void
@@ -777,11 +844,7 @@ static __always_inline bool is_conn_unreadable(const connection_info_t *conn) {
     return is_port_unreadable(conn->d_port) || is_port_unreadable(conn->s_port);
 }
 
-SEC("kprobe/tcp_close")
-int BPF_KPROBE_GUARDED(obi_kprobe_tcp_close, struct sock *sk, long timeout) {
-    (void)ctx;
-    (void)timeout;
-
+static __always_inline int tcp_close_entry(struct sock *sk) {
     const u64 id = bpf_get_current_pid_tgid();
 
     if (!valid_pid(id)) {
@@ -847,10 +910,22 @@ int BPF_KPROBE_GUARDED(obi_kprobe_tcp_close, struct sock *sk, long timeout) {
     return 0;
 }
 
-SEC("kprobe/sock_def_error_report")
-int BPF_KPROBE_GUARDED(obi_kprobe_sock_def_error_report, struct sock *sk) {
+SEC("kprobe/tcp_close")
+int BPF_KPROBE_GUARDED(obi_kprobe_tcp_close, struct sock *sk, long timeout) {
     (void)ctx;
+    (void)timeout;
 
+    return tcp_close_entry(sk);
+}
+
+SEC("fentry/tcp_close")
+int BPF_PROG_GUARDED(obi_fentry_tcp_close, struct sock *sk, long timeout) {
+    (void)timeout;
+
+    return tcp_close_entry(sk);
+}
+
+static __always_inline int sock_def_error_report_entry(struct sock *sk) {
     const u64 id = bpf_get_current_pid_tgid();
 
     if (!valid_pid(id)) {
@@ -889,6 +964,18 @@ int BPF_KPROBE_GUARDED(obi_kprobe_sock_def_error_report, struct sock *sk) {
     }
 
     return 0;
+}
+
+SEC("kprobe/sock_def_error_report")
+int BPF_KPROBE_GUARDED(obi_kprobe_sock_def_error_report, struct sock *sk) {
+    (void)ctx;
+
+    return sock_def_error_report_entry(sk);
+}
+
+SEC("fentry/sock_def_error_report")
+int BPF_PROG_GUARDED(obi_fentry_sock_def_error_report, struct sock *sk) {
+    return sock_def_error_report_entry(sk);
 }
 
 static __always_inline void setup_recvmsg(u64 id, struct sock *sk, struct msghdr *msg) {
@@ -1516,10 +1603,7 @@ int GUARDED_PROG(obi_socket__http_dns_filter, struct __sk_buff *, skb) {
     bpf sees normally. To mitigate this we work exclusively with namespaces. Only the clone_map
     and server_traces are keyed off the namespace:pid.
 */
-SEC("kretprobe/sys_clone")
-int BPF_KRETPROBE_GUARDED(obi_kretprobe_sys_clone, int tid) {
-    (void)ctx;
-
+static __always_inline int sys_clone_return(const int tid) {
     const u64 id = bpf_get_current_pid_tgid();
 
     if (!valid_pid(id) || tid < 0) {
@@ -1541,11 +1625,28 @@ int BPF_KRETPROBE_GUARDED(obi_kretprobe_sys_clone, int tid) {
     return 0;
 }
 
-SEC("kprobe/sys_exit")
-int BPF_KPROBE_GUARDED(obi_kprobe_sys_exit, int status) {
+SEC("kretprobe/sys_clone")
+int BPF_KRETPROBE_GUARDED(obi_kretprobe_sys_clone, int tid) {
     (void)ctx;
-    (void)status;
 
+    return sys_clone_return(tid);
+}
+
+SEC("fexit/sys_clone")
+int BPF_PROG_GUARDED(obi_fexit_sys_clone, const struct pt_regs *regs, long ret) {
+    (void)regs;
+
+    return sys_clone_return((int)ret);
+}
+
+SEC("fexit/sys_clone3")
+int BPF_PROG_GUARDED(obi_fexit_sys_clone3, const struct pt_regs *regs, long ret) {
+    (void)regs;
+
+    return sys_clone_return((int)ret);
+}
+
+static __always_inline int sys_exit_entry(void) {
     const u64 id = bpf_get_current_pid_tgid();
 
     if (!valid_pid(id)) {
@@ -1574,6 +1675,21 @@ int BPF_KPROBE_GUARDED(obi_kprobe_sys_exit, int status) {
     bpf_map_delete_elem(&java_vt_threads, &task.p_key);
 
     return 0;
+}
+
+SEC("kprobe/sys_exit")
+int BPF_KPROBE_GUARDED(obi_kprobe_sys_exit, int status) {
+    (void)ctx;
+    (void)status;
+
+    return sys_exit_entry();
+}
+
+SEC("fentry/sys_exit")
+int BPF_PROG_GUARDED(obi_fentry_sys_exit, const struct pt_regs *regs) {
+    (void)regs;
+
+    return sys_exit_entry();
 }
 
 SEC("kprobe/inet_csk_listen_stop")

@@ -10,7 +10,6 @@ import (
 	"context"
 	"errors"
 	"net/netip"
-	"runtime"
 	"sync"
 	"time"
 	"unsafe"
@@ -102,10 +101,8 @@ func disableAgentActivity(spec *ebpf.CollectionSpec) {
 // trampoline, which costs the opens of every process on the host far less
 // than the kprobe and kretprobe the kernels without one need.
 var openFexitSupported = sync.OnceValue(func() bool {
-	if runtime.GOARCH == "arm64" {
-		if major, _ := ebpfcommon.KernelVersion(); major < arm64TrampolineMajor {
-			return false
-		}
+	if !trampolinesSupported() {
+		return false
 	}
 	found, err := ebpfcommon.KernelHasSymbol(ebpfcommon.KSymDoSysOpenat2)
 	return err == nil && found

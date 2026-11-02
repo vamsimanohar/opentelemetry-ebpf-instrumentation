@@ -1544,3 +1544,40 @@ func TestMakeOtelBPFFSPathRejectsInaccessibleExistingDirectory(t *testing.T) {
 
 	require.ErrorContains(t, err, "accessing bpffs otel path")
 }
+
+type tracingStubTracer struct {
+	stubTracer
+	tracing []*ebpfcommon.Tracing
+	closers []io.Closer
+}
+
+func (s *tracingStubTracer) Tracing() []*ebpfcommon.Tracing { return s.tracing }
+func (s *tracingStubTracer) AddCloser(c ...io.Closer)        { s.closers = append(s.closers, c...) }
+
+// A tracing program that cannot attach is replaced by the kprobe it stands for.
+func TestTracingFallsBackToKprobe(t *testing.T) {
+	originalKprobe, originalKretprobe := attachKprobe, attachKretprobe
+	t.Cleanup(func() { attachKprobe, attachKretprobe = originalKprobe, originalKretprobe })
+
+	var attached []string
+	attachKprobe = func(symbol string, _ *ebpf.Program) (io.Closer, error) {
+		attached = append(attached, "kprobe/"+symbol)
+		return &countingCloser{}, nil
+	}
+	attachKretprobe = func(symbol string, _ *ebpf.Program) (io.Closer, error) {
+		attached = append(attached, "kretprobe/"+symbol)
+		return &countingCloser{}, nil
+	}
+
+	tracer := &tracingStubTracer{tracing: []*ebpfcommon.Tracing{
+		// a program the kernel never loaded cannot be attached
+		{Program: &ebpf.Program{}, AttachAs: ebpf.AttachTraceFEntry, Required: true,
+			Fallback: &ebpfcommon.KprobeFallback{Symbol: "tcp_close"}},
+		{Program: &ebpf.Program{}, AttachAs: ebpf.AttachTraceFExit, Required: true,
+			Fallback: &ebpfcommon.KprobeFallback{Symbol: "sys_connect", Return: true}},
+	}}
+
+	require.NoError(t, (&instrumenter{}).tracing(tracer))
+	assert.Equal(t, []string{"kprobe/tcp_close", "kretprobe/sys_connect"}, attached)
+	assert.Len(t, tracer.closers, 2)
+}
