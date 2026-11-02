@@ -71,6 +71,7 @@ static __always_inline call_protocol_args_t *make_protocol_args(const pid_connec
     args->lw_thread = lw_thread;
     args->protocols = protocols;
     args->protocol_type = protocol_type_for_conn_info(info);
+    args->unix_unbound = 0;
 
     args->pid_conn = *info;
     __builtin_memset(args->small_buf, 0, sizeof(args->small_buf));
@@ -123,6 +124,30 @@ static __always_inline void handle_buf_with_connection(void *ctx,
                                                        struct sock *sk) {
     handle_user_buf_with_connection(
         ctx, pid_conn, u_buf, bytes_len, NULL, 0, ssl, direction, orig_dport, sk);
+}
+
+static __always_inline void handle_unix_buf_with_connection(void *ctx,
+                                                            pid_connection_info_t *pid_conn,
+                                                            void *u_buf,
+                                                            int bytes_len,
+                                                            u8 direction,
+                                                            u8 unix_unbound) {
+    call_protocol_args_t *args = make_protocol_args(pid_conn,
+                                                    k_lw_thread_none,
+                                                    k_protocol_selector_all,
+                                                    u_buf,
+                                                    bytes_len,
+                                                    NO_SSL,
+                                                    direction,
+                                                    0,
+                                                    0);
+    if (!args) {
+        return;
+    }
+
+    args->unix_unbound = unix_unbound;
+
+    preempt_guarded_tail_call(ctx, &jump_table, k_tail_handle_buf_with_args);
 }
 
 static __always_inline void handle_light_weight_thread_buf(void *ctx,

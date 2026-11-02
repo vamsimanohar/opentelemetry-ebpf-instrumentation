@@ -55,7 +55,8 @@ typedef struct call_protocol_args {
     u8 wire_tp_found;
     int bytes_len;
     u16 orig_dport;
-    u16 _pad2;
+    u8 unix_unbound; // the receiving unix socket end has no address, see is_unix_sock_server
+    u8 _pad2;
     u64 u_buf;
     u64 self_ref_parent_id;
     u64 sock_ptr;
